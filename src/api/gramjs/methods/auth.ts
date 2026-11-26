@@ -1,5 +1,10 @@
-import { PasskeyLoginRequestedError, UserAlreadyAuthorizedError } from '../../../lib/gramjs/errors';
+import {
+  FloodWaitError,
+  PasskeyLoginRequestedError,
+  UserAlreadyAuthorizedError,
+} from '../../../lib/gramjs/errors';
 
+import type { SentCodeMetadata } from '../../../shared/sessionBridge';
 import type {
   ApiPasskeyOption,
   ApiUpdateAuthorizationState,
@@ -38,10 +43,11 @@ export function onRequestPhoneNumber() {
   });
 }
 
-export function onRequestCode(isCodeViaApp = false) {
+export function onRequestCode(isCodeViaApp = false, sentCodeInfo?: SentCodeMetadata) {
   sendApiUpdate({
     ...buildAuthStateUpdate('authorizationStateWaitCode'),
     isCodeViaApp,
+    sentCodeInfo,
   });
 
   return new Promise<string>((resolve, reject) => {
@@ -99,6 +105,7 @@ export function onAuthError(err: Error) {
     '@type': 'updateAuthorizationError',
     errorKey: messageKey,
     errorCode: errorMessage,
+    floodWaitSeconds: err instanceof FloodWaitError ? err.seconds : undefined,
   });
 }
 

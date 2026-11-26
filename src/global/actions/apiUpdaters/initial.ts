@@ -132,6 +132,25 @@ function onUpdateApiReady<T extends GlobalState>(global: T) {
   void retryLocalization(selectSharedSettings(global).language);
 }
 
+const CONSOLE_DIAGNOSTICS_STORAGE_KEY = 'tg_console_auth_diagnostics';
+
+function persistSafeAuthDiagnostics(global: GlobalState) {
+  if (typeof sessionStorage === 'undefined') return;
+  try {
+    sessionStorage.setItem(CONSOLE_DIAGNOSTICS_STORAGE_KEY, JSON.stringify({
+      connectionState: global.connectionState,
+      authState: global.auth.state,
+      sentCodeInfo: global.auth.sentCodeInfo,
+      floodWaitUntil: global.auth.floodWaitUntil,
+      errorCode: global.auth.errorCode,
+      isTestServer: Boolean(global.config?.isTestServer),
+      updatedAt: Date.now(),
+    }));
+  } catch {
+    // Ignore storage quota or restricted-mode errors
+  }
+}
+
 function onUpdateAuthorizationState<T extends GlobalState>(global: T, update: ApiUpdateAuthorizationState) {
   const wasAuthReady = global.auth.state === 'authorizationStateReady';
   const authState = update.authorizationState;
@@ -144,6 +163,12 @@ function onUpdateAuthorizationState<T extends GlobalState>(global: T, update: Ap
   global = getGlobal();
 
   switch (authState) {
+    case 'authorizationStateWaitPhoneNumber':
+      global = updateAuth(global, {
+        sentCodeInfo: undefined,
+      });
+      setGlobal(global);
+      break;
     case 'authorizationStateLoggingOut':
       void forceWebsync(false);
 
@@ -155,6 +180,9 @@ function onUpdateAuthorizationState<T extends GlobalState>(global: T, update: Ap
     case 'authorizationStateWaitCode':
       global = updateAuth(global, {
         isCodeViaApp: update.isCodeViaApp,
+        sentCodeInfo: update.sentCodeInfo,
+        floodWaitUntil: undefined,
+        errorCode: undefined,
       });
       setGlobal(global);
       break;
@@ -188,6 +216,9 @@ function onUpdateAuthorizationState<T extends GlobalState>(global: T, update: Ap
 
       global = updateAuth(global, {
         isLoggingOut: false,
+        sentCodeInfo: undefined,
+        floodWaitUntil: undefined,
+        errorCode: undefined,
       });
       Object.values(global.byTabId).forEach(({ id: tabId }) => {
         global = updateTabState(global, {
@@ -199,6 +230,9 @@ function onUpdateAuthorizationState<T extends GlobalState>(global: T, update: Ap
       break;
     }
   }
+
+  global = getGlobal();
+  persistSafeAuthDiagnostics(global);
 }
 
 function onUpdateAuthorizationError<T extends GlobalState>(global: T, update: ApiUpdateAuthorizationError) {
@@ -210,10 +244,19 @@ function onUpdateAuthorizationError<T extends GlobalState>(global: T, update: Ap
     return;
   }
 
+  const floodWaitUntil = update.floodWaitSeconds
+    ? Date.now() + update.floodWaitSeconds * 1000
+    : undefined;
+
   global = updateAuth(global, {
     errorKey: update.errorKey,
+    errorCode: update.errorCode,
+    floodWaitUntil,
+    isLoading: false,
   });
   setGlobal(global);
+  global = getGlobal();
+  persistSafeAuthDiagnostics(global);
 }
 
 function onUpdateUserAlreadyAuthorized<T extends GlobalState>(global: T, update: ApiUpdateUserAlreadyAuthorized) {
@@ -264,6 +307,7 @@ function onUpdateConnectionState<T extends GlobalState>(
     connectionState,
   };
   setGlobal(global);
+  persistSafeAuthDiagnostics(global);
 
   if (global.isSynced) {
     const channelStackIds = getOpenedShortpollChannelIds(global);

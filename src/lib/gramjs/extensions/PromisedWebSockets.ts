@@ -150,10 +150,12 @@ export default class PromisedWebSockets {
       // CONTEST
       // Seems to not be working, at least in a web worker
 
-      self.addEventListener('offline', () => {
-        this.close();
-        this.resolveRead?.(false);
-      });
+      if (typeof self !== 'undefined' && typeof self.addEventListener === 'function') {
+        self.addEventListener('offline', () => {
+          this.close();
+          this.resolveRead?.(false);
+        });
+      }
     });
   }
 

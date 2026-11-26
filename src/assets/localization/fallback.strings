@@ -4665,3 +4665,13 @@
 "SettingsKeywordsLastSeen" = "online, last seen, status";
 "SettingsKeywordsLogOut" = "log out, sign out, exit";
 "SettingsSearchEmpty" = "Start typing to find a setting";
+"MenuManagementConsole" = "لوحة الإدارة و MCP";
+"AuthUnofficialClientNotice" = "عميل غير رسمي مبني على Telegram Web Z — لا يتبع رسمياً لشركة Telegram";
+"AuthWssStatusReady" = "اتصال WSS متصل";
+"AuthWssStatusConnecting" = "جارٍ الاتصال عبر WSS...";
+"AuthWssStatusBroken" = "انقطع اتصال WSS";
+"AuthSentCodeTypeNotice" = "استجابة Telegram: {type}";
+"AuthSendCodeDeliveryCaveat" = "ملاحظة: قبول Telegram لطلب auth.sendCode لا يثبت وصول الرمز فعلياً إلى جهازك أو رسائلك.";
+"AuthEmailCodeSentNote" = "أبلغ Telegram عن إرسال رمز إلى البريد الإلكتروني ({email}).";
+"AuthEmailSetupRequiredNote" = "يتطلب Telegram إعداد بريد إلكتروني لتسجيل الدخول لهذا الحساب من تطبيق Telegram الرسمي أولاً.";
+"AuthFloodWaitActive" = "قيود FloodWait نشطة؛ لا تعِد طلب الرمز قبل انتهاء المهلة ({seconds} ثانية).";

@@ -7,15 +7,16 @@ import type {
 } from './types';
 
 export const APP_CODE_NAME = 'A';
-export const APP_ENV = import.meta.env.TG_APP_ENV;
-export const APP_NAME = import.meta.env.TG_APP_NAME || `Telegram Web ${APP_CODE_NAME}`;
+export const APP_ENV = typeof import.meta.env !== 'undefined' ? import.meta.env.TG_APP_ENV : 'production';
+export const APP_NAME = (typeof import.meta.env !== 'undefined' ? import.meta.env.TG_APP_NAME : undefined)
+  || `Telegram Web ${APP_CODE_NAME}`;
 
 export const PRODUCTION_HOSTNAME = 'web.telegram.org';
 export const PRODUCTION_URL = 'https://web.telegram.org/a';
 export const WEB_VERSION_BASE = 'https://web.telegram.org/'; // Used to redirect to other versions
-export const BASE_URL = import.meta.env.TG_PUBLIC_URL;
+export const BASE_URL = typeof import.meta.env !== 'undefined' ? import.meta.env.TG_PUBLIC_URL : '';
 export const ACCOUNT_QUERY = 'account';
-export const VAPID_SERVER_KEY = import.meta.env.TG_VAPID_KEY;
+export const VAPID_SERVER_KEY = typeof import.meta.env !== 'undefined' ? import.meta.env.TG_VAPID_KEY : undefined;
 
 export const IS_TEST = APP_ENV === 'test';
 export const IS_PERF = APP_ENV === 'perf';
@@ -34,11 +35,15 @@ export const BETA_CHANGELOG_URL = 'https://telegra.ph/WebA-Beta-03-20';
 
 export const DEBUG_GRAMJS = false;
 
-export const PAGE_TITLE = import.meta.env.TG_APP_TITLE;
+export const PAGE_TITLE = typeof import.meta.env !== 'undefined' ? import.meta.env.TG_APP_TITLE : APP_NAME;
 export const PAGE_TITLE_TAURI = 'Telegram Air';
-export const TELEGRAM_API_ID = Number(import.meta.env.TG_TELEGRAM_API_ID);
-export const TELEGRAM_API_HASH = import.meta.env.TG_TELEGRAM_API_HASH;
-export const TEST_SESSION = import.meta.env.TG_TEST_SESSION;
+export const TELEGRAM_API_ID = Number(
+  typeof import.meta.env !== 'undefined' ? import.meta.env.TG_TELEGRAM_API_ID : 0,
+);
+export const TELEGRAM_API_HASH = typeof import.meta.env !== 'undefined'
+  ? import.meta.env.TG_TELEGRAM_API_HASH
+  : undefined;
+export const TEST_SESSION = typeof import.meta.env !== 'undefined' ? import.meta.env.TG_TEST_SESSION : undefined;
 
 export const SESSION_LEGACY_USER_KEY = 'user_auth';
 export const SESSION_ACCOUNT_PREFIX = 'account';

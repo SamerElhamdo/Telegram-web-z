@@ -142,9 +142,9 @@ class Hash {
 
   async digest() {
     if (this.algorithm === 'sha1') {
-      return new Uint8Array(await self.crypto.subtle.digest('SHA-1', this.data));
+      return new Uint8Array(await globalThis.crypto.subtle.digest('SHA-1', this.data));
     } else {
-      return new Uint8Array(await self.crypto.subtle.digest('SHA-256', this.data));
+      return new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', this.data));
     }
   }
 }

@@ -82,6 +82,7 @@ export type ApiUpdateAuthorizationState = {
   '@type': 'updateAuthorizationState';
   authorizationState: ApiUpdateAuthorizationStateType;
   isCodeViaApp?: boolean;
+  sentCodeInfo?: import('../../shared/sessionBridge').SentCodeMetadata;
   hint?: string;
   noReset?: boolean;
   qrCode?: { token: string; expires: number };
@@ -105,6 +106,7 @@ export type ApiUpdateAuthorizationError = {
   '@type': 'updateAuthorizationError';
   errorKey: RegularLangFnParameters;
   errorCode?: string;
+  floodWaitSeconds?: number;
 };
 
 export type ApiUpdateUserAlreadyAuthorized = {

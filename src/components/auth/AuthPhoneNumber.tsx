@@ -221,6 +221,10 @@ const AuthPhoneNumber = ({
       return;
     }
 
+    if (auth.floodWaitUntil && auth.floodWaitUntil > Date.now()) {
+      return;
+    }
+
     const adaptedPhoneNumber = fullNumber?.replace(/[^\d]/g, '');
     if (adaptedPhoneNumber && phoneNumberSlots[adaptedPhoneNumber]) {
       window.location.replace(getAccountSlotUrl(phoneNumberSlots[adaptedPhoneNumber]));
@@ -240,7 +244,34 @@ const AuthPhoneNumber = ({
     loginWithPasskey();
   });
 
+  const handleOpenConsole = useLastCallback(() => {
+    window.location.assign('/console/');
+  });
+
   const isAuthReady = state === 'authorizationStateWaitPhoneNumber';
+  const { floodWaitUntil } = auth;
+  const [remainingFloodSeconds, setRemainingFloodSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!floodWaitUntil) {
+      setRemainingFloodSeconds(0);
+      return undefined;
+    }
+
+    const updateRemaining = () => {
+      const next = Math.max(0, Math.ceil((floodWaitUntil - Date.now()) / 1000));
+      setRemainingFloodSeconds(next);
+    };
+    updateRemaining();
+    const timer = window.setInterval(updateRemaining, 1000);
+    return () => window.clearInterval(timer);
+  }, [floodWaitUntil]);
+
+  const wssStatusText = connectionState === 'connectionStateReady'
+    ? lang('AuthWssStatusReady')
+    : connectionState === 'connectionStateBroken'
+      ? lang('AuthWssStatusBroken')
+      : lang('AuthWssStatusConnecting');
 
   return (
     <div id="auth-phone-number-form" className="custom-scroll">
@@ -258,6 +289,24 @@ const AuthPhoneNumber = ({
         <div id="logo" />
         <h1>{lang('AuthTitle')}</h1>
         <p className="note">{lang('StartText')}</p>
+        <div className="auth-diagnostics" dir="rtl">
+          <div className="auth-diagnostics-row">
+            <span className="auth-diagnostics-badge">{wssStatusText}</span>
+            <button
+              type="button"
+              className="auth-diagnostics-link"
+              onClick={handleOpenConsole}
+            >
+              {lang('MenuManagementConsole')}
+            </button>
+          </div>
+          <p className="auth-diagnostics-note">{lang('AuthUnofficialClientNotice')}</p>
+          {remainingFloodSeconds > 0 && (
+            <p className="auth-diagnostics-warning">
+              {lang('AuthFloodWaitActive', { seconds: remainingFloodSeconds })}
+            </p>
+          )}
+        </div>
         <form className="form" action="" onSubmit={handleSubmit}>
           <CountryCodeInput
             id="sign-in-phone-code"
@@ -287,6 +336,7 @@ const AuthPhoneNumber = ({
                 className="auth-button"
                 type="submit"
                 ripple
+                disabled={remainingFloodSeconds > 0}
                 isLoading={authIsLoading}
               >
                 {lang('LoginNext')}

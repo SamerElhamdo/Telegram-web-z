@@ -1,0 +1,15 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+:root {
+  font-family: "IBM Plex Sans Arabic", "Cairo", "Tajawal", "Segoe UI", Tahoma, sans-serif;
+}
+
+body {
+  direction: rtl;
+}
+
+.ltr-inline {
+  direction: ltr;
+  unicode-bidi: isolate;
+}

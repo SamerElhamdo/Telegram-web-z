@@ -3512,6 +3512,13 @@ export interface LangPair {
   'SettingsKeywordsLastSeen': undefined;
   'SettingsKeywordsLogOut': undefined;
   'SettingsSearchEmpty': undefined;
+  'MenuManagementConsole': undefined;
+  'AuthUnofficialClientNotice': undefined;
+  'AuthWssStatusReady': undefined;
+  'AuthWssStatusConnecting': undefined;
+  'AuthWssStatusBroken': undefined;
+  'AuthSendCodeDeliveryCaveat': undefined;
+  'AuthEmailSetupRequiredNote': undefined;
 }
 
 export interface LangPairWithVariables<V = LangVariable> {
@@ -5809,6 +5816,15 @@ export interface LangPairWithVariables<V = LangVariable> {
   'PeerPickerUnknownPeer': {
     'id': V;
   };
+  'AuthSentCodeTypeNotice': {
+    'type': V;
+  };
+  'AuthEmailCodeSentNote': {
+    'email': V;
+  };
+  'AuthFloodWaitActive': {
+    'seconds': V;
+  };
 }
 
 export interface LangPairPlural {
@@ -7364,7 +7380,8 @@ export interface LangKeyGroups {
   };
   'type': {
     keys:
-      | 'SearchContextCaption';
+      | 'SearchContextCaption'
+      | 'AuthSentCodeTypeNotice';
     variables: 'type';
   };
   'chats,folder': {
@@ -8068,6 +8085,16 @@ export interface LangKeyGroups {
     keys:
       | 'PeerPickerUnknownPeer';
     variables: 'id';
+  };
+  'email': {
+    keys:
+      | 'AuthEmailCodeSentNote';
+    variables: 'email';
+  };
+  'seconds': {
+    keys:
+      | 'AuthFloodWaitActive';
+    variables: 'seconds';
   };
 }
 

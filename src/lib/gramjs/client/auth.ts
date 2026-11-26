@@ -1,4 +1,5 @@
 import type { ApiPasskeyOption } from '../../../api/types';
+import type { SentCodeDeliveryType, SentCodeMetadata } from '../../../shared/sessionBridge';
 import type TelegramClient from './TelegramClient';
 import type { Update } from './TelegramClient';
 
@@ -21,7 +22,7 @@ export interface UserAuthParams {
   phoneNumber: string | (() => Promise<string>);
   webAuthTokenFailed: () => void;
   onPasskeyOption: (passkeyOption: ApiPasskeyOption) => void;
-  phoneCode: (isCodeViaApp?: boolean) => Promise<string>;
+  phoneCode: (isCodeViaApp?: boolean, sentCodeInfo?: SentCodeMetadata) => Promise<string>;
   password: (hint?: string, noReset?: boolean) => Promise<string>;
   firstAndLastNames: () => Promise<[string, string?]>;
   qrCode: (qrCode: { token: Uint8Array; expires: number }) => Promise<void>;
@@ -147,6 +148,7 @@ async function signInUser(
   let phoneNumber;
   let phoneCodeHash;
   let isCodeViaApp;
+  let sentCodeInfo: SentCodeMetadata | undefined;
   lastUsedMethod = 'phoneNumber';
 
   while (true) {
@@ -171,6 +173,7 @@ async function signInUser(
       const sendCodeResult = await sendCode(client, apiCredentials, phoneNumber, authParams.forceSMS);
       phoneCodeHash = sendCodeResult.phoneCodeHash;
       isCodeViaApp = sendCodeResult.isCodeViaApp;
+      sentCodeInfo = sendCodeResult.sentCodeInfo;
 
       if (typeof phoneCodeHash !== 'string') {
         throw new Error('Failed to retrieve phone code hash');
@@ -194,7 +197,7 @@ async function signInUser(
   while (1) {
     try {
       try {
-        phoneCode = await authParams.phoneCode(isCodeViaApp);
+        phoneCode = await authParams.phoneCode(isCodeViaApp, sentCodeInfo);
       } catch (err: unknown) {
         // This is the support for changing phone number from the phone code screen.
         if (err instanceof Error && err.message === 'RESTART_AUTH') {
@@ -455,11 +458,49 @@ export async function signInUserWithPasskey(
   }
 }
 
+const MAX_AUTH_RESTART_RETRIES = 1;
+
+function normalizeSentCodeType(sentCodeType: Api.auth.TypeSentCodeType): SentCodeDeliveryType {
+  if (sentCodeType instanceof Api.auth.SentCodeTypeApp) return 'SentCodeTypeApp';
+  if (sentCodeType instanceof Api.auth.SentCodeTypeSms) return 'SentCodeTypeSms';
+  if (sentCodeType instanceof Api.auth.SentCodeTypeCall) return 'SentCodeTypeCall';
+  if (sentCodeType instanceof Api.auth.SentCodeTypeFlashCall) return 'SentCodeTypeFlashCall';
+  if (sentCodeType instanceof Api.auth.SentCodeTypeMissedCall) return 'SentCodeTypeMissedCall';
+  if (sentCodeType instanceof Api.auth.SentCodeTypeEmailCode) return 'SentCodeTypeEmailCode';
+  if (sentCodeType instanceof Api.auth.SentCodeTypeSetUpEmailRequired) return 'SentCodeTypeSetUpEmailRequired';
+  if (sentCodeType instanceof Api.auth.SentCodeTypeFragmentSms) return 'SentCodeTypeFragmentSms';
+  if (sentCodeType instanceof Api.auth.SentCodeTypeFirebaseSms) return 'SentCodeTypeFirebaseSms';
+  if (sentCodeType instanceof Api.auth.SentCodeTypeSmsWord) return 'SentCodeTypeSmsWord';
+  if (sentCodeType instanceof Api.auth.SentCodeTypeSmsPhrase) return 'SentCodeTypeSmsPhrase';
+  return 'Unknown';
+}
+
+function buildSentCodeMetadata(result: Api.auth.SentCode): SentCodeMetadata {
+  const type = normalizeSentCodeType(result.type);
+  const length = 'length' in result.type && typeof result.type.length === 'number' ? result.type.length : undefined;
+  const emailPattern = result.type instanceof Api.auth.SentCodeTypeEmailCode ? result.type.emailPattern : undefined;
+  const nextType = result.nextType?.className;
+  const timeout = result.timeout;
+
+  return {
+    type,
+    length,
+    nextType,
+    timeout,
+    emailPattern,
+  };
+}
+
 async function sendCode(
-  client: TelegramClient, apiCredentials: ApiCredentials, phoneNumber: string, forceSMS = false,
+  client: TelegramClient,
+  apiCredentials: ApiCredentials,
+  phoneNumber: string,
+  forceSMS = false,
+  retryCount = 0,
 ): Promise<{
   phoneCodeHash: string;
   isCodeViaApp: boolean;
+  sentCodeInfo: SentCodeMetadata;
 }> {
   try {
     const { apiId, apiHash } = apiCredentials;
@@ -470,15 +511,20 @@ async function sendCode(
       settings: new Api.CodeSettings(),
     }));
 
+    if (sendResult instanceof Api.auth.SentCodePaymentRequired) {
+      throw new Error('TELEGRAM_AUTH_PAYMENT_REQUIRED');
+    }
+
     if (!(sendResult instanceof Api.auth.SentCode)) {
       throw Error('Unexpected SentCodeSuccess');
     }
 
-    // If we already sent a SMS, do not resend the phoneCode (hash may be empty)
+    // Never automatically invoke `auth.resendCode` unless explicitly requested via `forceSMS`
     if (!forceSMS || (sendResult.type instanceof Api.auth.SentCodeTypeSms)) {
       return {
         phoneCodeHash: sendResult.phoneCodeHash,
         isCodeViaApp: sendResult.type instanceof Api.auth.SentCodeTypeApp,
+        sentCodeInfo: buildSentCodeMetadata(sendResult),
       };
     }
 
@@ -487,6 +533,10 @@ async function sendCode(
       phoneCodeHash: sendResult.phoneCodeHash,
     }));
 
+    if (resendResult instanceof Api.auth.SentCodePaymentRequired) {
+      throw new Error('TELEGRAM_AUTH_PAYMENT_REQUIRED');
+    }
+
     if (!(resendResult instanceof Api.auth.SentCode)) {
       throw Error('Unexpected SentCodeSuccess');
     }
@@ -494,13 +544,13 @@ async function sendCode(
     return {
       phoneCodeHash: resendResult.phoneCodeHash,
       isCodeViaApp: resendResult.type instanceof Api.auth.SentCodeTypeApp,
+      sentCodeInfo: buildSentCodeMetadata(resendResult),
     };
   } catch (err: unknown) {
-    if (err instanceof RPCError && err.errorMessage === 'AUTH_RESTART') {
-      return sendCode(client, apiCredentials, phoneNumber, forceSMS);
-    } else {
-      throw err;
+    if (err instanceof RPCError && err.errorMessage === 'AUTH_RESTART' && retryCount < MAX_AUTH_RESTART_RETRIES) {
+      return sendCode(client, apiCredentials, phoneNumber, forceSMS, retryCount + 1);
     }
+    throw err;
   }
 }
 

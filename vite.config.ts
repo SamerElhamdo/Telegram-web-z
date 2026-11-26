@@ -227,6 +227,13 @@ export default defineConfig(async ({ mode }): Promise<UserConfig> => {
       watch: {
         ignored: DEV_SERVER_WATCH_IGNORES,
       },
+      proxy: {
+        '/api': 'http://127.0.0.1:8787',
+        '/mcp': 'http://127.0.0.1:8787',
+        '/healthz': 'http://127.0.0.1:8787',
+        '/readyz': 'http://127.0.0.1:8787',
+        '/console': 'http://127.0.0.1:1235',
+      },
     },
     preview: {
       headers: responseHeaders,

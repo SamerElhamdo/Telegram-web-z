@@ -1,5 +1,9 @@
 # Telegram Web A
 
+> **Modified Unofficial Edition (2026-11-26 — GNU GPL-3.0-or-later):**
+> This repository contains a modified, **unofficial** self-hosted Telegram account management web app and Streamable HTTP MCP server built on top of Telegram Web Z / Web A (`https://github.com/TelegramOrg/Telegram-web-z.git`). It is **not** affiliated with or endorsed by Telegram, and connects using GramJS MTProto over WSS (not the Telegram Bot API). Original notices, copyright attributions, and the GNU GPLv3 [`LICENSE`](./LICENSE) are preserved intact.
+> See [`docs/ARCHITECTURE_AND_HOSTING.md`](./docs/ARCHITECTURE_AND_HOSTING.md) for architecture, session encryption, MCP Streamable HTTP tools, private hosting deployment, backup/restore, and GPLv3 license details, and [`docs/DOKPLOY_DEPLOY.md`](./docs/DOKPLOY_DEPLOY.md) for Dokploy deployment instructions.
+
 This project won the first prize 🥇 at [Telegram Lightweight Client Contest](https://contest.com/javascript-web-3) and now is an official Telegram client available to anyone at [web.telegram.org/a](https://web.telegram.org/a).
 
 According to the original contest rules, it has nearly zero dependencies and is fully based on its own [Teact](https://github.com/Ajaxy/teact) framework (which re-implements React paradigm). It also uses a custom version of [GramJS](https://github.com/gram-js/gramjs) as an MTProto implementation.

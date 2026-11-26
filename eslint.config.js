@@ -26,6 +26,10 @@ export default defineConfig(
   }),
   globalIgnores([
     '.cache/',
+    'console/**',
+    'server/**',
+    'vite.console.config.ts',
+    'vitest.server.config.ts',
     'src/lib/video-preview/polyfill',
     'src/lib/widget-sandbox/**',
     'src/lib/gramjs/tl/',

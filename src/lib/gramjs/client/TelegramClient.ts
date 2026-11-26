@@ -82,7 +82,7 @@ type TelegramClientParams = {
   shouldDebugExportedSenders: boolean;
 };
 
-type TimeoutId = number;
+type TimeoutId = ReturnType<typeof setTimeout>;
 
 export type Update = (
     Api.TypeUpdate | Api.TypeUpdates
@@ -684,8 +684,7 @@ class TelegramClient {
         }));
 
         if (this.session.dcId !== dcId && !sender._authenticated) {
-          // Prevent another connection from trying to export the auth key while we're doing it
-          await navigator.locks.request('GRAMJS_AUTH_EXPORT', async () => {
+          const exportAuth = async () => {
             this._log.info(`Exporting authorization for data center ${dc.ipAddress}`);
             const auth = await this.invoke(new Api.auth.ExportAuthorization({ dcId }));
 
@@ -695,7 +694,14 @@ class TelegramClient {
             }));
             await sender.send(req);
             sender._authenticated = true;
-          });
+          };
+
+          // Prevent another connection from trying to export the auth key while we're doing it
+          if (typeof navigator !== 'undefined' && navigator.locks) {
+            await navigator.locks.request('GRAMJS_AUTH_EXPORT', exportAuth);
+          } else {
+            await exportAuth();
+          }
         } else {
           // Heads the queue, so later requests go out initialized; awaiting it would make its failure the connection's
           void sender.send(this._initWith(new Api.help.GetConfig()))?.catch(() => undefined);

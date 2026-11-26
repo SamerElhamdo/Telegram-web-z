@@ -205,9 +205,12 @@ export type GlobalState = {
     isLoading?: boolean;
     isLoadingQrCode?: boolean;
     errorKey?: RegularLangFnParameters;
+    errorCode?: string;
+    floodWaitUntil?: number;
     rememberMe?: boolean;
     nearestCountry?: string;
     isCodeViaApp?: boolean;
+    sentCodeInfo?: import('../../shared/sessionBridge').SentCodeMetadata;
     hint?: string;
     qrCode?: {
       token: string;

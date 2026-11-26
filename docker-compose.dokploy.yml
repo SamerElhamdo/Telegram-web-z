@@ -1,0 +1,54 @@
+# Dedicated Docker Compose stack for Dokploy (Traefik-managed HTTPS & networking).
+# Configure your domain in Dokploy -> Domains -> Service: app, Internal Port: 8787, HTTPS: ON (Let's Encrypt).
+# Do NOT add `container_name` or bind host ports 80/443 here so Dokploy's built-in Traefik manages routing cleanly.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+        TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+        BASE_URL: ${BASE_URL}
+        APP_TITLE: ${APP_TITLE:-Telegram Web Z Manager (Unofficial)}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 8787
+      DATA_DIR: /app/data
+      TRUST_PROXY: "true"
+      REQUIRE_HTTPS: "true"
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_RUNTIME_MODE: ${TELEGRAM_RUNTIME_MODE:-gramjs}
+      BASE_URL: ${BASE_URL}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
+      ACCOUNT_OWNER_ID: ${ACCOUNT_OWNER_ID:-primary-owner}
+      SESSION_ENCRYPTION_KEY: ${SESSION_ENCRYPTION_KEY}
+      ADMIN_AUTH_TOKEN: ${ADMIN_AUTH_TOKEN}
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN}
+      MCP_AUTH_TOKEN_PREVIOUS: ${MCP_AUTH_TOKEN_PREVIOUS:-}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+    volumes:
+      - vault_data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    expose:
+      - "8787"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  vault_data:

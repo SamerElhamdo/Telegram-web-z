@@ -1,0 +1,705 @@
+import { readFile, stat } from 'node:fs/promises';
+import { extname, join, resolve } from 'node:path';
+import { Hono } from 'hono';
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
+import { z } from 'zod';
+
+import type { Context, Next } from 'hono';
+import type { ApprovalStore } from '../approvals/approvalStore';
+import type { ServerConfig } from '../config';
+import type { EncryptedSessionVault } from '../storage/sessionVault';
+import type { TelegramAccountRuntime } from '../telegram/types';
+
+import { createTelegramMcpHandler, MCP_TOOL_CATALOG } from '../mcp/createMcpHandler';
+import {
+  createSignedSessionCookie,
+  deriveAes256Key,
+  generateStrongToken,
+  hashSecretToken,
+  verifyConstantTimeString,
+  verifySignedSessionCookie,
+  verifyTokenAgainstHashes,
+} from '../security/crypto';
+
+export type AppContextDeps = {
+  config: ServerConfig;
+  vault: EncryptedSessionVault;
+  approvals: ApprovalStore;
+  runtime: TelegramAccountRuntime;
+  serverVersion: string;
+};
+
+const ADMIN_COOKIE_NAME = 'tg_console_session';
+const ADMIN_SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours
+const MAX_JSON_BODY_BYTES = 256 * 1024; // 256 KB
+
+const LOGIN_BODY_SCHEMA = z.object({
+  token: z.string().min(1).max(256),
+});
+
+const IMPORT_SESSION_BODY_SCHEMA = z.object({
+  label: z.string().trim().max(80).optional(),
+  payload: z.unknown(),
+});
+
+const SEND_MESSAGE_BODY_SCHEMA = z.object({
+  chatId: z.string().trim().min(1).max(64).regex(/^-?\d+$/),
+  text: z.string().trim().min(1).max(4096),
+  replyToMsgId: z.number().int().positive().optional(),
+  confirmedTargetAccountId: z.string().trim().min(3).max(64),
+  confirmedTargetChatId: z.string().trim().min(1).max(64),
+});
+
+const APPROVE_BODY_SCHEMA = z.object({
+  executeNow: z.boolean().optional().default(true),
+});
+
+const REJECT_BODY_SCHEMA = z.object({
+  reason: z.string().trim().max(200).optional(),
+});
+
+const ROTATE_TOKEN_BODY_SCHEMA = z.object({
+  keepPrevious: z.boolean().optional().default(true),
+});
+
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.wasm': 'application/wasm',
+  '.tgs': 'application/octet-stream',
+  '.mp4': 'video/mp4',
+  '.webmanifest': 'application/manifest+json',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+export function createServerApp(deps: AppContextDeps) {
+  const { config, vault, approvals, runtime, serverVersion } = deps;
+  const app = new Hono();
+
+  const cookieSigningKey = deriveAes256Key(`cookie-signing:${config.sessionEncryptionKey}:${config.adminAuthToken}`);
+  const adminTokenHash = hashSecretToken(config.adminAuthToken);
+  const mcpHandler = createTelegramMcpHandler({
+    ownerId: config.ownerId,
+    vault,
+    approvals,
+    runtime,
+    serverVersion,
+  });
+
+  // Global security headers
+  app.use('*', async (c, next) => {
+    await next();
+    c.header('X-Content-Type-Options', 'nosniff');
+    c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+    c.header('X-Frame-Options', 'SAMEORIGIN');
+    if (isSecureRequest(c, config)) {
+      c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+  });
+
+  // Health & Readiness endpoints (no secrets exposed)
+  app.get('/healthz', (c) => (
+    c.json({
+      status: 'ok',
+      service: 'telegram-web-z-mcp',
+      version: serverVersion,
+      runtimeMode: runtime.mode,
+      timestamp: Date.now(),
+    })
+  ));
+
+  app.get('/readyz', (c) => (
+    c.json({
+      status: 'ready',
+      linkedAccountsCount: vault.listAccounts(config.ownerId).length,
+      runtimeMode: runtime.mode,
+    })
+  ));
+
+  // Streamable HTTP MCP endpoint (/mcp) with strict HTTPS/Origin/Bearer authentication
+  app.all('/mcp', async (c) => {
+    if (config.requireHttps && !isSecureRequest(c, config)) {
+      return c.json(
+        { error: 'HTTPS is required for MCP Streamable HTTP access.' },
+        403,
+      );
+    }
+
+    const origin = c.req.header('origin');
+    if (origin && !isOriginAllowed(origin, config, c.req.url)) {
+      await vault.appendAudit({
+        actor: 'mcp',
+        action: 'mcp.origin.rejected',
+        status: 'denied',
+        detail: `Disallowed Origin: ${origin}`,
+      });
+      return c.json({ error: 'Forbidden Origin header' }, 403);
+    }
+
+    const bearer = extractBearerToken(c.req.header('authorization'));
+    const validHashes = vault.getValidMcpTokenHashes();
+    if (!verifyTokenAgainstHashes(bearer, validHashes)) {
+      await vault.appendAudit({
+        actor: 'mcp',
+        action: 'mcp.auth.failed',
+        status: 'denied',
+        detail: 'Missing or invalid Bearer token',
+      });
+      c.header('WWW-Authenticate', 'Bearer realm="telegram-web-z-mcp", error="invalid_token"');
+      return c.json({ error: 'Unauthorized: valid Bearer token required' }, 401);
+    }
+
+    c.header('Cache-Control', 'no-store');
+    c.header('X-Accel-Buffering', 'no');
+    return mcpHandler.fetch(c.req.raw);
+  });
+
+  // Admin Console Authentication endpoints
+  app.post('/api/auth/login', async (c) => {
+    c.header('Cache-Control', 'no-store');
+    const body = await readValidatedJson(c, LOGIN_BODY_SCHEMA);
+    if (!body) {
+      return c.json({ error: 'طلب غير صالح' }, 400);
+    }
+
+    if (!verifyTokenAgainstHashes(body.token, [adminTokenHash])) {
+      await vault.appendAudit({
+        actor: 'admin',
+        action: 'admin.login.failed',
+        status: 'denied',
+        detail: 'Invalid admin token attempt',
+      });
+      return c.json({ error: 'رمز الدخول الإداري غير صحيح' }, 401);
+    }
+
+    const csrfToken = generateStrongToken(24);
+    const cookieVal = createSignedSessionCookie(
+      { ownerId: config.ownerId, issuedAt: Date.now(), csrfToken },
+      cookieSigningKey,
+    );
+
+    setCookie(c, ADMIN_COOKIE_NAME, cookieVal, {
+      httpOnly: true,
+      sameSite: 'Strict',
+      secure: isSecureRequest(c, config),
+      path: '/',
+      maxAge: Math.floor(ADMIN_SESSION_MAX_AGE_MS / 1000),
+    });
+
+    await vault.appendAudit({
+      actor: 'admin',
+      action: 'admin.login.success',
+      status: 'ok',
+    });
+
+    return c.json({
+      authenticated: true,
+      csrfToken,
+      ownerId: config.ownerId,
+      runtimeMode: runtime.mode,
+    });
+  });
+
+  app.post('/api/auth/logout', async (c) => {
+    deleteCookie(c, ADMIN_COOKIE_NAME, { path: '/' });
+    return c.json({ authenticated: false });
+  });
+
+  app.get('/api/auth/me', (c) => {
+    c.header('Cache-Control', 'no-store');
+    const auth = resolveAdminAuth(c, config, cookieSigningKey, adminTokenHash);
+    if (!auth) {
+      return c.json({ authenticated: false }, 200);
+    }
+    return c.json({
+      authenticated: true,
+      csrfToken: auth.csrfToken,
+      ownerId: auth.ownerId,
+      runtimeMode: runtime.mode,
+    });
+  });
+
+  // Protect all remaining /api/* routes with Admin Auth + CSRF check on mutating requests
+  const requireAdminMiddleware = async (c: Context, next: Next) => {
+    c.header('Cache-Control', 'no-store');
+    if (config.requireHttps && !isSecureRequest(c, config)) {
+      return c.json({ error: 'HTTPS is required' }, 403);
+    }
+
+    const auth = resolveAdminAuth(c, config, cookieSigningKey, adminTokenHash);
+    if (!auth) {
+      return c.json({ error: 'غير مصرح — يرجى تسجيل الدخول إلى لوحة الإدارة أولاً' }, 401);
+    }
+
+    const method = c.req.method.toUpperCase();
+    if (auth.viaCookie && method !== 'GET' && method !== 'HEAD') {
+      const providedCsrf = c.req.header('x-csrf-token');
+      if (!verifyConstantTimeString(providedCsrf, auth.csrfToken)) {
+        return c.json({ error: 'رمز الحماية CSRF غير صالح' }, 403);
+      }
+    }
+
+    c.set('adminOwnerId' as never, auth.ownerId as never);
+    await next();
+    return undefined;
+  };
+
+  app.use('/api/accounts/*', requireAdminMiddleware);
+  app.use('/api/accounts', requireAdminMiddleware);
+  app.use('/api/approvals/*', requireAdminMiddleware);
+  app.use('/api/approvals', requireAdminMiddleware);
+  app.use('/api/mcp/*', requireAdminMiddleware);
+  app.use('/api/audit', requireAdminMiddleware);
+
+  // Accounts API
+  app.get('/api/accounts', (c) => {
+    const accounts = vault.listAccounts(config.ownerId);
+    return c.json({
+      accounts,
+      runtimeMode: runtime.mode,
+      disclaimer: 'عميل غير رسمي مبني على Telegram Web Z — لا يتبع رسمياً لشركة Telegram.',
+    });
+  });
+
+  app.post('/api/accounts/import-session', async (c) => {
+    const body = await readValidatedJson(c, IMPORT_SESSION_BODY_SCHEMA);
+    if (!body) {
+      return c.json({ error: 'صيغة طلب ربط الجلسة غير صالحة' }, 400);
+    }
+
+    try {
+      const summary = await vault.upsertAccountFromBridge(config.ownerId, body.payload, body.label);
+      return c.json({
+        account: summary,
+        notice: 'تم تشفير الجلسة وحفظها على الخادم باستخدام AES-256-GCM ومفتاح منفصل. لم يتم تسجيل أي مفاتيح في السجلات.',
+      }, 201);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'فشل التحقق من الجلسة';
+      return c.json({ error: message }, 400);
+    }
+  });
+
+  app.get('/api/accounts/:accountId/status', async (c) => {
+    const accountId = c.req.param('accountId');
+    const account = vault.getAuthorizedAccount(config.ownerId, accountId);
+    if (!account) {
+      return c.json({ error: 'الحساب غير موجود أو غير مصرح به' }, 404);
+    }
+
+    const status = await runtime.getAccountStatus(account);
+    return c.json({ status });
+  });
+
+  app.delete('/api/accounts/:accountId', async (c) => {
+    const accountId = c.req.param('accountId');
+    await runtime.disconnectAccount(accountId);
+    const removed = await vault.deleteAccount(config.ownerId, accountId);
+    if (!removed) {
+      return c.json({ error: 'الحساب غير موجود أو غير مصرح به' }, 404);
+    }
+
+    return c.json({
+      deleted: true,
+      accountId,
+      revocationNotice: 'تم حذف النسخة المحلية المشفرة من الخادم فقط. هذا لا ينهي الجلسة على خوادم Telegram؛ لإبطالها افتح إعدادات Telegram ← الأجهزة.',
+    });
+  });
+
+  // Dialogs & Messages API
+  app.get('/api/accounts/:accountId/dialogs', async (c) => {
+    const account = vault.getAuthorizedAccount(config.ownerId, c.req.param('accountId'));
+    if (!account) return c.json({ error: 'الحساب غير موجود' }, 404);
+
+    const limit = clampInt(c.req.query('limit'), 30, 1, 100);
+    const archived = c.req.query('archived') === 'true';
+
+    try {
+      const dialogs = await runtime.listDialogs(account, { limit, archived });
+      return c.json({ dialogs });
+    } catch (err: unknown) {
+      return c.json({ error: err instanceof Error ? err.message : 'تعذر جلب المحادثات' }, 502);
+    }
+  });
+
+  app.get('/api/accounts/:accountId/messages', async (c) => {
+    const account = vault.getAuthorizedAccount(config.ownerId, c.req.param('accountId'));
+    if (!account) return c.json({ error: 'الحساب غير موجود' }, 404);
+
+    const chatId = c.req.query('chatId');
+    if (!chatId || !/^-?\d+$/.test(chatId)) {
+      return c.json({ error: 'معرّف المحادثة chatId مطلوب وبصيغة رقمية صحيحة' }, 400);
+    }
+    const limit = clampInt(c.req.query('limit'), 30, 1, 100);
+    const offsetId = c.req.query('offsetId') ? clampInt(c.req.query('offsetId'), 0, 0, 2_000_000_000) : undefined;
+
+    try {
+      const messages = await runtime.readMessages(account, { chatId, limit, offsetId });
+      return c.json({ messages });
+    } catch (err: unknown) {
+      return c.json({ error: err instanceof Error ? err.message : 'تعذر قراءة الرسائل' }, 502);
+    }
+  });
+
+  app.get('/api/accounts/:accountId/search', async (c) => {
+    const account = vault.getAuthorizedAccount(config.ownerId, c.req.param('accountId'));
+    if (!account) return c.json({ error: 'الحساب غير موجود' }, 404);
+
+    const query = (c.req.query('q') || '').trim();
+    if (!query || query.length > 256) {
+      return c.json({ error: 'عبارة البحث مطلوبة (1 إلى 256 حرفاً)' }, 400);
+    }
+    const chatId = c.req.query('chatId')?.trim() || undefined;
+    if (chatId && !/^-?\d+$/.test(chatId)) {
+      return c.json({ error: 'معرّف المحادثة غير صالح' }, 400);
+    }
+    const limit = clampInt(c.req.query('limit'), 20, 1, 50);
+
+    try {
+      const messages = await runtime.searchMessages(account, { query, chatId, limit });
+      return c.json({ messages });
+    } catch (err: unknown) {
+      return c.json({ error: err instanceof Error ? err.message : 'تعذر البحث في الرسائل' }, 502);
+    }
+  });
+
+  app.post('/api/accounts/:accountId/send', async (c) => {
+    const accountId = c.req.param('accountId');
+    const account = vault.getAuthorizedAccount(config.ownerId, accountId);
+    if (!account) return c.json({ error: 'الحساب غير موجود' }, 404);
+
+    const body = await readValidatedJson(c, SEND_MESSAGE_BODY_SCHEMA);
+    if (!body) {
+      return c.json({ error: 'بيانات الإرسال غير مكتملة أو غير صالحة' }, 400);
+    }
+
+    if (body.confirmedTargetAccountId !== account.id || body.confirmedTargetChatId !== body.chatId) {
+      return c.json({ error: 'يلزم تأكيد الحساب والمحادثة المستهدفين بدقة قبل الإرسال' }, 400);
+    }
+
+    try {
+      const sent = await runtime.sendMessage(account, {
+        chatId: body.chatId,
+        text: body.text,
+        replyToMsgId: body.replyToMsgId,
+      });
+      await vault.appendAudit({
+        actor: 'admin',
+        action: 'ui.send_message',
+        accountId: account.id,
+        target: body.chatId,
+        status: 'ok',
+        detail: `Sent message #${sent.messageId} after explicit UI confirmation`,
+      });
+      return c.json({ sent });
+    } catch (err: unknown) {
+      return c.json({ error: err instanceof Error ? err.message : 'تعذر إرسال الرسالة' }, 502);
+    }
+  });
+
+  // Approvals API (for MCP write actions)
+  app.get('/api/approvals', (c) => {
+    const items = approvals.listForOwner(config.ownerId);
+    return c.json({ approvals: items });
+  });
+
+  app.post('/api/approvals/:id/approve', async (c) => {
+    const approvalId = c.req.param('id');
+    const body = (await readValidatedJson(c, APPROVE_BODY_SCHEMA)) || { executeNow: true };
+
+    try {
+      const approved = approvals.approve(config.ownerId, approvalId);
+
+      if (!body.executeNow) {
+        await vault.appendAudit({
+          actor: 'admin',
+          action: `approval.approved.${approved.action}`,
+          accountId: approved.accountId,
+          target: approved.targetLabel,
+          status: 'ok',
+          detail: `Approved ${approved.id} for agent execution`,
+        });
+        return c.json({ approval: approved });
+      }
+
+      const account = vault.getAuthorizedAccount(config.ownerId, approved.accountId);
+      if (!account) {
+        approvals.markExecuted(config.ownerId, approved.id, undefined, 'Account no longer linked');
+        return c.json({ error: 'الحساب المرتبط بهذا الطلب لم يعد متصلاً' }, 404);
+      }
+
+      approvals.consumeApprovedForExecution({
+        ownerId: config.ownerId,
+        approvalId: approved.id,
+        accountId: approved.accountId,
+        action: approved.action,
+        payload: approved.payload,
+      });
+
+      const executionResult = await executeApprovedAction(runtime, account, approved.action, approved.payload);
+      const updated = approvals.markExecuted(config.ownerId, approved.id, executionResult);
+
+      await vault.appendAudit({
+        actor: 'admin',
+        action: `approval.executed.${approved.action}`,
+        accountId: approved.accountId,
+        target: approved.targetLabel,
+        status: 'ok',
+        detail: `Approved and executed ${approved.id}`,
+      });
+
+      return c.json({ approval: updated, result: executionResult });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'تعذر اعتماد الطلب';
+      return c.json({ error: message }, 400);
+    }
+  });
+
+  app.post('/api/approvals/:id/reject', async (c) => {
+    const approvalId = c.req.param('id');
+    const body = (await readValidatedJson(c, REJECT_BODY_SCHEMA)) || {};
+    try {
+      const rejected = approvals.reject(config.ownerId, approvalId, body.reason);
+      await vault.appendAudit({
+        actor: 'admin',
+        action: `approval.rejected.${rejected.action}`,
+        accountId: rejected.accountId,
+        target: rejected.targetLabel,
+        status: 'denied',
+        detail: body.reason || 'Rejected by user',
+      });
+      return c.json({ approval: rejected });
+    } catch (err: unknown) {
+      return c.json({ error: err instanceof Error ? err.message : 'تعذر رفض الطلب' }, 400);
+    }
+  });
+
+  // MCP Settings & Token Rotation API
+  app.get('/api/mcp/settings', (c) => {
+    const requestOrigin = resolvePublicOrigin(c, config);
+    const tokenMeta = vault.getMcpTokenMetadata();
+    return c.json({
+      endpointUrl: `${requestOrigin}/mcp`,
+      transport: 'Streamable HTTP (MCP 2025-11-25 & 2026-07-28)',
+      authScheme: 'Bearer Token (قابل للتدوير)',
+      httpsEnforced: config.requireHttps,
+      runtimeMode: runtime.mode,
+      allowedOrigins: config.mcpAllowedOrigins,
+      hasPreviousToken: tokenMeta.hasPreviousToken,
+      rotatedAt: tokenMeta.rotatedAt,
+      tools: MCP_TOOL_CATALOG,
+    });
+  });
+
+  app.post('/api/mcp/rotate-token', async (c) => {
+    const body = (await readValidatedJson(c, ROTATE_TOKEN_BODY_SCHEMA)) || { keepPrevious: true };
+    const rotated = await vault.rotateMcpToken(body.keepPrevious);
+    return c.json({
+      newToken: rotated.token,
+      rotatedAt: rotated.rotatedAt,
+      keepPrevious: body.keepPrevious,
+      warning: 'يُعرض هذا الرمز مرة واحدة فقط. احفظه في إعدادات وكيل الذكاء الاصطناعي فوراً ولن يُخزّن بنص صريح على الخادم.',
+    });
+  });
+
+  app.get('/api/audit', (c) => {
+    const limit = clampInt(c.req.query('limit'), 50, 1, 200);
+    return c.json({ entries: vault.getAuditLog(limit) });
+  });
+
+  // Static serving for HeroUI Management Console (/console and /console/*)
+  app.get('/console', (c) => c.redirect('/console/', 302));
+  app.get('/console/*', async (c) => {
+    const relativePath = c.req.path.replace(/^\/console\/?/, '') || 'index.html';
+    const served = await tryServeStaticFile(config.consoleDistDir, relativePath, 'index.html');
+    if (served) return served;
+    return c.text('Management console build not found. Run `npm run build:console`.', 404);
+  });
+
+  // Static serving for Telegram Web Z (/*)
+  app.get('*', async (c) => {
+    const relativePath = c.req.path.replace(/^\//, '') || 'index.html';
+    const served = await tryServeStaticFile(config.distDir, relativePath, 'index.html');
+    if (served) return served;
+    return c.text('Telegram Web Z build not found. Run `npm run build:production`.', 404);
+  });
+
+  return { app, mcpHandler };
+}
+
+async function executeApprovedAction(
+  runtime: TelegramAccountRuntime,
+  account: NonNullable<ReturnType<EncryptedSessionVault['getAuthorizedAccount']>>,
+  action: 'send_message' | 'create_group' | 'create_channel' | 'mark_chat_read',
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  switch (action) {
+    case 'send_message':
+      return runtime.sendMessage(account, {
+        chatId: String(payload.chatId),
+        text: String(payload.text),
+        replyToMsgId: typeof payload.replyToMsgId === 'number' ? payload.replyToMsgId : undefined,
+      });
+    case 'create_group':
+      return runtime.createGroup(account, {
+        title: String(payload.title),
+        userIds: Array.isArray(payload.userIds) ? payload.userIds.map(String) : [],
+      });
+    case 'create_channel':
+      return runtime.createChannel(account, {
+        title: String(payload.title),
+        about: typeof payload.about === 'string' ? payload.about : '',
+        isMegagroup: Boolean(payload.isMegagroup),
+      });
+    case 'mark_chat_read':
+      return runtime.markChatRead(account, {
+        chatId: String(payload.chatId),
+        maxId: typeof payload.maxId === 'number' ? payload.maxId : undefined,
+      });
+  }
+}
+
+function resolveAdminAuth(
+  c: Context,
+  config: ServerConfig,
+  cookieSigningKey: Buffer,
+  adminTokenHash: string,
+): { ownerId: string; csrfToken?: string; viaCookie: boolean } | undefined {
+  const bearer = extractBearerToken(c.req.header('authorization'));
+  if (bearer && verifyTokenAgainstHashes(bearer, [adminTokenHash])) {
+    return { ownerId: config.ownerId, viaCookie: false };
+  }
+
+  const rawCookie = getCookie(c, ADMIN_COOKIE_NAME);
+  const parsed = verifySignedSessionCookie(rawCookie, cookieSigningKey, ADMIN_SESSION_MAX_AGE_MS);
+  if (parsed && parsed.ownerId === config.ownerId) {
+    return { ownerId: parsed.ownerId, csrfToken: parsed.csrfToken, viaCookie: true };
+  }
+
+  return undefined;
+}
+
+function extractBearerToken(header?: string): string | undefined {
+  if (!header) return undefined;
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match?.[1]?.trim() || undefined;
+}
+
+function isSecureRequest(c: Context, config: ServerConfig): boolean {
+  if (config.trustProxy) {
+    const forwardedProto = c.req.header('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
+    if (forwardedProto === 'https') return true;
+  }
+  try {
+    return new URL(c.req.url).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function resolvePublicOrigin(c: Context, config: ServerConfig): string {
+  if (config.publicOrigin) return config.publicOrigin.replace(/\/+$/, '');
+  const proto = isSecureRequest(c, config) ? 'https' : 'http';
+  const host = c.req.header('x-forwarded-host') || c.req.header('host') || `127.0.0.1:${config.port}`;
+  return `${proto}://${host}`;
+}
+
+function isOriginAllowed(origin: string, config: ServerConfig, requestUrl: string): boolean {
+  try {
+    const parsedOrigin = new URL(origin);
+    const normalized = parsedOrigin.origin;
+
+    if (config.mcpAllowedOrigins.includes(normalized)) {
+      return true;
+    }
+
+    const requestOrigin = new URL(requestUrl).origin;
+    if (normalized === requestOrigin) {
+      return true;
+    }
+
+    if (!config.isProduction && (
+      parsedOrigin.hostname === 'localhost'
+      || parsedOrigin.hostname === '127.0.0.1'
+      || parsedOrigin.hostname === '[::1]'
+    )) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function readValidatedJson<T>(c: Context, schema: z.ZodType<T>): Promise<T | undefined> {
+  const contentLength = Number(c.req.header('content-length') || 0);
+  if (contentLength > MAX_JSON_BODY_BYTES) return undefined;
+
+  try {
+    const rawText = await c.req.text();
+    if (Buffer.byteLength(rawText, 'utf8') > MAX_JSON_BODY_BYTES) return undefined;
+    const parsed = JSON.parse(rawText);
+    const result = schema.safeParse(parsed);
+    return result.success ? result.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function clampInt(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+async function tryServeStaticFile(
+  rootDir: string,
+  relativePath: string,
+  spaFallback?: string,
+): Promise<Response | undefined> {
+  const normalizedRoot = resolve(rootDir);
+  const candidate = resolve(normalizedRoot, relativePath);
+  if (!candidate.startsWith(normalizedRoot)) {
+    return new Response('Forbidden', { status: 403 });
+  }
+
+  const direct = await readStaticFileIfExists(candidate);
+  if (direct) return direct;
+
+  if (spaFallback && !extname(relativePath)) {
+    const fallbackFile = resolve(normalizedRoot, spaFallback);
+    return readStaticFileIfExists(fallbackFile);
+  }
+
+  return undefined;
+}
+
+async function readStaticFileIfExists(filePath: string): Promise<Response | undefined> {
+  try {
+    const info = await stat(filePath);
+    if (!info.isFile()) return undefined;
+    const buffer = await readFile(filePath);
+    const contentType = MIME_TYPES[extname(filePath).toLowerCase()] || 'application/octet-stream';
+    return new Response(buffer, {
+      status: 200,
+      headers: {
+        'Content-Type': contentType,
+        'Cache-Control': extname(filePath) === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+      },
+    });
+  } catch {
+    return undefined;
+  }
+}

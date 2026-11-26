@@ -1,0 +1,35 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# MCP Streamable HTTP: disable response buffering so SSE streaming works cleanly
+	handle /mcp* {
+		reverse_proxy app:8787 {
+			flush_interval -1
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+		}
+	}
+
+	handle /healthz {
+		reverse_proxy app:8787
+	}
+
+	handle {
+		reverse_proxy app:8787 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+		}
+	}
+}

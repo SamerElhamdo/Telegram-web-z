@@ -175,6 +175,10 @@ const LeftSideMenuItems = ({
     openUrl({ url: FEEDBACK_URL });
   });
 
+  const handleOpenManagementConsole = useLastCallback(() => {
+    window.location.assign('/console/');
+  });
+
   return (
     <>
       {IS_MULTIACCOUNT_SUPPORTED && currentUser && (
@@ -241,6 +245,12 @@ const LeftSideMenuItems = ({
         onClick={onSelectSettings}
       >
         {lang('MenuSettings')}
+      </MenuItem>
+      <MenuItem
+        icon="bots"
+        onClick={handleOpenManagementConsole}
+      >
+        {lang('MenuManagementConsole')}
       </MenuItem>
       <NestedMenuItem
         icon="more"
