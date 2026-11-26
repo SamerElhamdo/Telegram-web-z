@@ -235,9 +235,10 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
                 </div>
                 {!accounts.length && <p className="text-sm text-warning">اربط جلسة من تبويب الحسابات أولاً، وستظهر هنا تلقائياً.</p>}
                 {draft.accountId && !isLoadingDialogs && dialogs.length === 0 && <p className="text-sm text-muted">لم نجد مجموعات في هذا الحساب. تحقق من أن الجلسة عضو في المجموعة المطلوبة.</p>}
-                  <Input required value={draft.name} onChange={(e) => setDraft((current) => ({ ...current, name: e.target.value }))}>
-                  <Label>اسم الوكيل</Label>
-                </Input>
+                <div className="space-y-2">
+                  <Label htmlFor="agent-name">اسم الوكيل</Label>
+                  <Input id="agent-name" required value={draft.name} onChange={(e) => setDraft((current) => ({ ...current, name: e.target.value }))} />
+                </div>
               </FormSection>
 
               <FormSection number="02" title="النموذج والمفتاح" description="مفتاح OpenRouter محفوظ مشفّراً ولا يظهر بعد الحفظ.">
@@ -249,16 +250,19 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
                   <a className="text-xs text-primary underline-offset-4 hover:underline" href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">إنشاء مفتاح</a>
                 </div>
                 <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-                  <Input
-                    type="password"
-                    autoComplete="new-password"
-                    value={apiKey}
-                    placeholder={draft.id && agents.find((agent) => agent.id === draft.id)?.hasApiKey ? 'المفتاح محفوظ؛ اتركه كما هو' : 'أدخل مفتاح OpenRouter'}
-                    onChange={(e) => setApiKey(e.target.value)}
-                  >
-                    <Label>مفتاح API</Label>
-                    {draft.id && agents.find((agent) => agent.id === draft.id)?.hasApiKey && <Description>المفتاح الحالي محفوظ. أدخل مفتاحاً جديداً لاستبداله.</Description>}
-                  </Input>
+                  <div className="space-y-2">
+                    <Label htmlFor="openrouter-api-key">مفتاح API</Label>
+                    <Input
+                      id="openrouter-api-key"
+                      type="password"
+                      autoComplete="new-password"
+                      value={apiKey}
+                      placeholder={draft.id && agents.find((agent) => agent.id === draft.id)?.hasApiKey ? 'المفتاح محفوظ؛ اتركه كما هو' : 'أدخل مفتاح OpenRouter'}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      aria-describedby={draft.id && agents.find((agent) => agent.id === draft.id)?.hasApiKey ? 'openrouter-key-help' : undefined}
+                    />
+                    {draft.id && agents.find((agent) => agent.id === draft.id)?.hasApiKey && <Description id="openrouter-key-help">المفتاح الحالي محفوظ. أدخل مفتاحاً جديداً لاستبداله.</Description>}
+                  </div>
                   <Button type="button" variant="secondary" isDisabled={isLoadingModels || (!apiKey && !draft.id)} onPress={() => void loadModels()}>
                     {isLoadingModels ? <><Spinner size="sm" /> تحميل النماذج</> : 'تحديث النماذج'}
                   </Button>
