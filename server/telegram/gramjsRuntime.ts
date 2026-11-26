@@ -25,9 +25,11 @@ type ManagedClientEntry = {
   inputPeers: Map<string, Api.TypeInputPeer>;
   inputUsers: Map<string, Api.TypeInputUser>;
   lastUsedAt: number;
+  ownUserId?: string;
+  ownUsername?: string;
 };
 
-export type IncomingTelegramMessage = { accountId: string; chatId: string; messageId: number; text: string; isOutgoing: boolean };
+export type IncomingTelegramMessage = { accountId: string; chatId: string; messageId: number; text: string; isOutgoing: boolean; isMentioned: boolean };
 
 const CONNECT_TIMEOUT_MS = 15000;
 const REQUEST_TIMEOUT_MS = 15000;
@@ -491,6 +493,8 @@ export class GramJsTelegramAccountRuntime implements TelegramAccountRuntime {
       inputPeers: new Map(),
       inputUsers: new Map(),
       lastUsedAt: Date.now(),
+      ownUserId: account.profile.userId,
+      ownUsername: account.profile.username,
     };
     this.clients.set(account.id, entry);
     this.attachUpdateHandler(account.id, entry);
@@ -501,15 +505,30 @@ export class GramJsTelegramAccountRuntime implements TelegramAccountRuntime {
     const handler = this.incomingMessageHandler;
     if (!handler) return;
     entry.client.addEventHandler((rawUpdate) => {
-      const update = rawUpdate as { message?: unknown; chatId?: bigint | number; id?: number; out?: boolean };
-      const message = update.message as { id?: number; message?: string; out?: boolean; peerId?: unknown } | undefined;
+      const update = rawUpdate as { message?: unknown; chatId?: bigint | number; id?: number; out?: boolean; mentioned?: boolean; entities?: { offset?: number; length?: number; userId?: bigint }[] };
+      const message = update.message as { id?: number; message?: string; out?: boolean; mentioned?: boolean; entities?: { offset?: number; length?: number; userId?: bigint }[]; peerId?: unknown } | undefined;
       const messageId = message?.id ?? update.id;
       const messageText = message?.message ?? (typeof update.message === 'string' ? update.message : undefined);
       const chatId = message?.peerId
         ? extractChatIdFromPeer(entry.gramjs.Api, message.peerId as Api.TypePeer)
         : (update.chatId !== undefined ? `-${update.chatId}` : undefined);
       if (!Number.isInteger(messageId) || !messageText?.trim() || !chatId) return;
-      handler({ accountId, chatId, messageId: messageId!, text: messageText, isOutgoing: Boolean(message?.out ?? update.out) });
+      const mentionUsername = entry.ownUsername
+        ? new RegExp(`(^|\\s)@${escapeRegExp(entry.ownUsername)}(?=$|\\s|[.,!?:;])`, 'i').test(messageText)
+        : false;
+      const mentionEntity = (message?.entities || update.entities)?.some((entity) => {
+        if (entity.userId !== undefined && entry.ownUserId) return String(entity.userId) === entry.ownUserId;
+        if (!entry.ownUsername || entity.offset === undefined || entity.length === undefined) return false;
+        return messageText.slice(entity.offset, entity.offset + entity.length).replace(/^@/, '').toLowerCase() === entry.ownUsername.toLowerCase();
+      }) || false;
+      handler({
+        accountId,
+        chatId,
+        messageId: messageId!,
+        text: messageText,
+        isOutgoing: Boolean(message?.out ?? update.out),
+        isMentioned: Boolean(message?.mentioned || update.mentioned || mentionEntity || mentionUsername),
+      });
     }, { build: (update) => update });
   }
 
@@ -576,6 +595,10 @@ function extractChatIdFromPeer(GramJs: typeof Api, peer?: Api.TypePeer): string 
   if (peer instanceof GramJs.PeerChat) return `-${peer.chatId}`;
   if (peer instanceof GramJs.PeerChannel) return `-100${peer.channelId}`;
   return undefined;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function resolvePeerSummary(

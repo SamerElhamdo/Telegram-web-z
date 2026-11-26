@@ -73,8 +73,16 @@ const AGENT_BODY_SCHEMA = z.object({
   clearApiKey: z.boolean().optional(),
   systemPrompt: z.string().trim().min(1).max(12000),
   tools: z.array(z.enum(['read_group_messages', 'search_group_messages', 'reply_to_group'])).max(3),
+  memoryMessages: z.number().int().min(20).max(100),
   isEnabled: z.boolean(),
 });
+
+const OPENROUTER_MODELS_BODY_SCHEMA = z.object({
+  apiKey: z.string().max(512).optional(),
+  agentId: z.string().trim().min(5).max(32).optional(),
+});
+
+const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models?output_modalities=text&endpoints=%2Fapi%2Fv1%2Fchat%2Fcompletions&supported_parameters=tools&sort=most-popular&limit=100';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -113,10 +121,10 @@ export function createServerApp(deps: AppContextDeps) {
   });
 
   const updateRuntime = runtime as TelegramAccountRuntime & {
-    setIncomingMessageHandler?: (handler: (message: { accountId: string; chatId: string; messageId: number; text: string; isOutgoing: boolean }) => void) => void;
+    setIncomingMessageHandler?: (handler: (message: { accountId: string; chatId: string; messageId: number; text: string; isOutgoing: boolean; isMentioned: boolean }) => void) => void;
   };
   updateRuntime.setIncomingMessageHandler?.((message) => {
-    if (!message.isOutgoing) void handleAgentMessage(message).catch((err: unknown) => {
+    if (!message.isOutgoing && message.isMentioned) void handleAgentMessage(message).catch((err: unknown) => {
       void vault.appendAudit({
         actor: 'system', action: 'agent.reply', accountId: message.accountId, target: message.chatId,
         status: 'error', detail: err instanceof Error ? err.message : 'Agent response failed',
@@ -131,6 +139,12 @@ export function createServerApp(deps: AppContextDeps) {
     const account = vault.getAuthorizedAccount(config.ownerId, agent.accountId);
     if (!storedAgent?.apiKey || !account) return;
 
+    const eventId = `${message.accountId}:${message.chatId}:${message.messageId}`;
+    const wasAdded = await vault.appendAgentMemory(agent.id, { role: 'user', text: message.text, eventId });
+    if (!wasAdded) return;
+    const refreshedAgent = vault.getAgent(agent.id)!;
+    const memory = refreshedAgent.memory.slice(-Math.max(20, refreshedAgent.memoryMessages));
+
     const endpoint = `${storedAgent.providerUrl.replace(/\/+$/, '')}/chat/completions`;
     const availableTools = [
       ...(agent.tools.includes('read_group_messages') ? [{ type: 'function', function: { name: 'read_group_messages', description: 'Read recent messages in the configured group', parameters: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 30 } } } } }] : []),
@@ -139,13 +153,18 @@ export function createServerApp(deps: AppContextDeps) {
     ];
     const messages: Array<Record<string, unknown>> = [
       { role: 'system', content: storedAgent.systemPrompt },
-      { role: 'user', content: message.text },
+      ...memory.map((entry) => ({ role: entry.role, content: entry.text })),
     ];
     let isReplied = false;
     for (let turn = 0; turn < 4; turn += 1) {
       const response = await fetch(endpoint, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${storedAgent.apiKey}`, 'Content-Type': 'application/json' },
+        headers: {
+          Authorization: `Bearer ${storedAgent.apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://tg.encryptosystem.com',
+          'X-Title': 'Telegram Web Z Console',
+        },
         body: JSON.stringify({ model: storedAgent.model, messages, tools: availableTools, tool_choice: 'auto' }),
         signal: AbortSignal.timeout(30_000),
       });
@@ -157,7 +176,9 @@ export function createServerApp(deps: AppContextDeps) {
       const toolCalls = assistantMessage.tool_calls || [];
       if (!toolCalls.length) {
         if (!isReplied && typeof assistantMessage.content === 'string' && assistantMessage.content.trim()) {
-          await runtime.sendMessage(account, { chatId: agent.chatId, text: assistantMessage.content.trim().slice(0, 4096), replyToMsgId: message.messageId });
+          const reply = assistantMessage.content.trim().slice(0, 4096);
+          await runtime.sendMessage(account, { chatId: agent.chatId, text: reply, replyToMsgId: message.messageId });
+          await vault.appendAgentMemory(agent.id, { role: 'assistant', text: reply });
           isReplied = true;
         }
         break;
@@ -170,7 +191,9 @@ export function createServerApp(deps: AppContextDeps) {
         } else if (toolCall.function.name === 'search_group_messages' && agent.tools.includes('search_group_messages') && args.query?.trim()) {
           output = await runtime.searchMessages(account, { chatId: agent.chatId, query: args.query.slice(0, 200), limit: 20 });
         } else if (toolCall.function.name === 'reply_to_group' && args.text?.trim() && !isReplied) {
-          output = await runtime.sendMessage(account, { chatId: agent.chatId, text: args.text.trim().slice(0, 4096), replyToMsgId: message.messageId });
+          const reply = args.text.trim().slice(0, 4096);
+          output = await runtime.sendMessage(account, { chatId: agent.chatId, text: reply, replyToMsgId: message.messageId });
+          await vault.appendAgentMemory(agent.id, { role: 'assistant', text: reply });
           isReplied = true;
         } else {
           output = { error: 'Tool is unavailable or arguments are invalid' };
@@ -349,6 +372,28 @@ export function createServerApp(deps: AppContextDeps) {
   app.use('/api/audit', requireAdminMiddleware);
 
   app.get('/api/agents', (c) => c.json({ agents: vault.listAgents() }));
+
+  app.post('/api/agents/models', async (c) => {
+    const body = await readValidatedJson(c, OPENROUTER_MODELS_BODY_SCHEMA);
+    if (!body) return c.json({ error: 'بيانات تحميل نماذج OpenRouter غير صالحة' }, 400);
+    const apiKey = body.apiKey || (body.agentId ? vault.getAgent(body.agentId)?.apiKey : undefined);
+    if (!apiKey) return c.json({ error: 'أدخل مفتاح OpenRouter أولاً لتحميل النماذج' }, 400);
+    try {
+      const response = await fetch(OPENROUTER_MODELS_URL, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) return c.json({ error: `تعذر تحميل نماذج OpenRouter (HTTP ${response.status})` }, 502);
+      const result = await response.json() as { data?: { id?: string; name?: string; context_length?: number; supported_parameters?: string[] }[] };
+      const models = (result.data || [])
+        .filter((model) => model.id && model.name)
+        .map((model) => ({ id: model.id!, name: model.name!, contextLength: model.context_length }))
+        .slice(0, 100);
+      return c.json({ models });
+    } catch {
+      return c.json({ error: 'تعذر الاتصال بـ OpenRouter لتحميل النماذج' }, 502);
+    }
+  });
 
   app.post('/api/agents', async (c) => {
     const body = await readValidatedJson(c, AGENT_BODY_SCHEMA);

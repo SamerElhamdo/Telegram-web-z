@@ -71,11 +71,15 @@ export type StoredAgentConfig = {
   apiKey: string;
   systemPrompt: string;
   tools: AgentTool[];
+  memoryMessages: number;
+  memory: AgentMemoryEntry[];
   isEnabled: boolean;
   updatedAt: number;
 };
 
-export type PublicAgentConfig = Omit<StoredAgentConfig, 'apiKey'> & { hasApiKey: boolean };
+export type AgentMemoryEntry = { role: 'user' | 'assistant'; text: string; eventId?: string; createdAt: number };
+
+export type PublicAgentConfig = Omit<StoredAgentConfig, 'apiKey' | 'memory'> & { hasApiKey: boolean; memoryCount: number };
 
 type VaultDocument = {
   version: 1;
@@ -140,7 +144,11 @@ export class EncryptedSessionVault {
             ? decrypted.mcpTokens
             : this.doc.mcpTokens,
           auditLog: Array.isArray(decrypted.auditLog) ? decrypted.auditLog.slice(-MAX_AUDIT_ENTRIES) : [],
-          agents: decrypted.agents || {},
+          agents: Object.fromEntries(Object.entries(decrypted.agents || {}).map(([id, agent]) => [id, {
+            ...agent,
+            memoryMessages: Math.max(20, agent.memoryMessages || 20),
+            memory: Array.isArray(agent.memory) ? agent.memory : [],
+          }])),
         };
       }
     } catch (err: unknown) {
@@ -204,7 +212,7 @@ export class EncryptedSessionVault {
     return this.doc.agents[id];
   }
 
-  async upsertAgent(input: Omit<StoredAgentConfig, 'id' | 'apiKey' | 'updatedAt'> & { id?: string; apiKey?: string; clearApiKey?: boolean }): Promise<PublicAgentConfig> {
+  async upsertAgent(input: Omit<StoredAgentConfig, 'id' | 'apiKey' | 'updatedAt' | 'memory'> & { id?: string; apiKey?: string; clearApiKey?: boolean }): Promise<PublicAgentConfig> {
     const id = input.id || `agt_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
     const existing = this.doc.agents[id];
     const agent: StoredAgentConfig = {
@@ -217,12 +225,24 @@ export class EncryptedSessionVault {
       apiKey: input.clearApiKey ? '' : (input.apiKey || existing?.apiKey || ''),
       systemPrompt: input.systemPrompt,
       tools: input.tools,
+      memoryMessages: Math.max(20, input.memoryMessages),
+      memory: existing?.memory || [],
       isEnabled: input.isEnabled,
       updatedAt: Date.now(),
     };
     this.doc.agents[id] = agent;
     await this.persist();
     return toPublicAgentConfig(agent);
+  }
+
+  async appendAgentMemory(id: string, entry: Omit<AgentMemoryEntry, 'createdAt'>): Promise<boolean> {
+    const agent = this.doc.agents[id];
+    if (!agent) return false;
+    if (entry.eventId && agent.memory.some((item) => item.eventId === entry.eventId)) return false;
+    agent.memory.push({ ...entry, text: entry.text.slice(0, 4096), createdAt: Date.now() });
+    agent.memory = agent.memory.slice(-Math.max(20, agent.memoryMessages));
+    await this.persist();
+    return true;
   }
 
   async deleteAgent(id: string): Promise<boolean> {
@@ -352,8 +372,8 @@ export class EncryptedSessionVault {
 }
 
 function toPublicAgentConfig(agent: StoredAgentConfig): PublicAgentConfig {
-  const { apiKey, ...publicAgent } = agent;
-  return { ...publicAgent, hasApiKey: Boolean(apiKey) };
+  const { apiKey, memory, ...publicAgent } = agent;
+  return { ...publicAgent, hasApiKey: Boolean(apiKey), memoryCount: memory.length };
 }
 
 export function toPublicAccountSummary(account: StoredAccountRecord): PublicAccountSummary {

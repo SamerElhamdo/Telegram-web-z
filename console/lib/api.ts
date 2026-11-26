@@ -21,10 +21,14 @@ export type PublicAgentConfig = {
   model: string;
   systemPrompt: string;
   tools: Array<'read_group_messages' | 'search_group_messages' | 'reply_to_group'>;
+  memoryMessages: number;
   isEnabled: boolean;
   hasApiKey: boolean;
+  memoryCount: number;
   updatedAt: number;
 };
+
+export type OpenRouterModel = { id: string; name: string; contextLength?: number };
 
 export type AccountStatus = {
   accountId: string;
@@ -165,7 +169,10 @@ export const consoleApi = {
   logout: () => apiFetch<{ authenticated: boolean }>('/api/auth/logout', { method: 'POST' }),
   listAccounts: () => apiFetch<{ accounts: PublicAccountSummary[]; runtimeMode: 'gramjs' | 'mock'; disclaimer: string }>('/api/accounts'),
   listAgents: () => apiFetch<{ agents: PublicAgentConfig[] }>('/api/agents'),
-  saveAgent: (agent: Omit<PublicAgentConfig, 'id' | 'hasApiKey' | 'updatedAt'> & { id?: string; apiKey?: string; clearApiKey?: boolean }) => (
+  listOpenRouterModels: (apiKey?: string, agentId?: string) => apiFetch<{ models: OpenRouterModel[] }>('/api/agents/models', {
+    method: 'POST', body: JSON.stringify({ apiKey: apiKey || undefined, agentId }),
+  }),
+  saveAgent: (agent: Omit<PublicAgentConfig, 'id' | 'hasApiKey' | 'memoryCount' | 'updatedAt'> & { id?: string; apiKey?: string; clearApiKey?: boolean }) => (
     apiFetch<{ agent: PublicAgentConfig }>('/api/agents', { method: 'POST', body: JSON.stringify(agent) })
   ),
   deleteAgent: (id: string) => apiFetch<{ deleted: boolean }>(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
