@@ -27,6 +27,8 @@ type ManagedClientEntry = {
   lastUsedAt: number;
 };
 
+export type IncomingTelegramMessage = { accountId: string; chatId: string; messageId: number; text: string; isOutgoing: boolean };
+
 const CONNECT_TIMEOUT_MS = 15000;
 const REQUEST_TIMEOUT_MS = 15000;
 
@@ -35,10 +37,16 @@ export class GramJsTelegramAccountRuntime implements TelegramAccountRuntime {
   private readonly apiId: number;
   private readonly apiHash: string;
   private readonly clients = new Map<string, ManagedClientEntry>();
+  private incomingMessageHandler?: (message: IncomingTelegramMessage) => void;
 
   constructor(options: { apiId: number; apiHash: string }) {
     this.apiId = options.apiId;
     this.apiHash = options.apiHash;
+  }
+
+  setIncomingMessageHandler(handler: (message: IncomingTelegramMessage) => void): void {
+    this.incomingMessageHandler = handler;
+    for (const [accountId, entry] of this.clients) this.attachUpdateHandler(accountId, entry);
   }
 
   async getAccountStatus(account: StoredAccountRecord): Promise<AccountRuntimeStatus> {
@@ -485,7 +493,24 @@ export class GramJsTelegramAccountRuntime implements TelegramAccountRuntime {
       lastUsedAt: Date.now(),
     };
     this.clients.set(account.id, entry);
+    this.attachUpdateHandler(account.id, entry);
     return entry;
+  }
+
+  private attachUpdateHandler(accountId: string, entry: ManagedClientEntry): void {
+    const handler = this.incomingMessageHandler;
+    if (!handler) return;
+    entry.client.addEventHandler((rawUpdate) => {
+      const update = rawUpdate as { message?: unknown; chatId?: bigint | number; id?: number; out?: boolean };
+      const message = update.message as { id?: number; message?: string; out?: boolean; peerId?: unknown } | undefined;
+      const messageId = message?.id ?? update.id;
+      const messageText = message?.message ?? (typeof update.message === 'string' ? update.message : undefined);
+      const chatId = message?.peerId
+        ? extractChatIdFromPeer(entry.gramjs.Api, message.peerId as Api.TypePeer)
+        : (update.chatId !== undefined ? `-${update.chatId}` : undefined);
+      if (!Number.isInteger(messageId) || !messageText?.trim() || !chatId) return;
+      handler({ accountId, chatId, messageId: messageId!, text: messageText, isOutgoing: Boolean(message?.out ?? update.out) });
+    }, { build: (update) => update });
   }
 
   private async resolveInputPeer(

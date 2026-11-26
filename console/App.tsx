@@ -10,6 +10,7 @@ import {
 import type { PublicAccountSummary } from './lib/api';
 
 import { AccountsPage } from './components/AccountsPage';
+import { AgentsPage } from './components/AgentsPage';
 import { AdminLoginGate } from './components/AdminLoginGate';
 import { ChatsAndApprovalsPage } from './components/ChatsAndApprovalsPage';
 import { McpSettingsPage } from './components/McpSettingsPage';
@@ -22,7 +23,7 @@ export function App() {
   const [accounts, setAccounts] = useState<PublicAccountSummary[]>([]);
   const [isLoadingAccounts, setIsLoadingAccounts] = useState(false);
   const [globalError, setGlobalError] = useState<string | undefined>();
-  const [isDark, setIsDark] = useState(false);
+  const [isDark, setIsDark] = useState(true);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDark);
@@ -138,6 +139,10 @@ export function App() {
                 المحادثات والموافقات
                 <Tabs.Indicator />
               </Tabs.Tab>
+              <Tabs.Tab id="agents">
+                وكلاء الذكاء الاصطناعي
+                <Tabs.Indicator />
+              </Tabs.Tab>
               <Tabs.Tab id="mcp">
                 إعدادات MCP والأمان
                 <Tabs.Indicator />
@@ -156,6 +161,10 @@ export function App() {
 
           <Tabs.Panel id="chats" className="pt-5">
             <ChatsAndApprovalsPage accounts={accounts} />
+          </Tabs.Panel>
+
+          <Tabs.Panel id="agents" className="pt-5">
+            <AgentsPage accounts={accounts} />
           </Tabs.Panel>
 
           <Tabs.Panel id="mcp" className="pt-5">

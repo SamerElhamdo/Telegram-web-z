@@ -6,6 +6,7 @@ export type GramJsClientInstance = {
   isConnected(): boolean;
   destroy(): void;
   invoke<T extends Api.AnyRequest>(request: T): Promise<T['__response']>;
+  addEventHandler(callback: (update: unknown) => void, event: { build(update: unknown): unknown }): void;
 };
 
 export type GramJsRuntimeModule = {

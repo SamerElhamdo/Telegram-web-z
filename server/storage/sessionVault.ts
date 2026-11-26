@@ -59,6 +59,24 @@ export type AuditLogEntry = {
   detail?: string;
 };
 
+export type AgentTool = 'read_group_messages' | 'search_group_messages' | 'reply_to_group';
+
+export type StoredAgentConfig = {
+  id: string;
+  name: string;
+  accountId: string;
+  chatId: string;
+  providerUrl: string;
+  model: string;
+  apiKey: string;
+  systemPrompt: string;
+  tools: AgentTool[];
+  isEnabled: boolean;
+  updatedAt: number;
+};
+
+export type PublicAgentConfig = Omit<StoredAgentConfig, 'apiKey'> & { hasApiKey: boolean };
+
 type VaultDocument = {
   version: 1;
   accounts: Record<string, StoredAccountRecord>;
@@ -68,6 +86,7 @@ type VaultDocument = {
     rotatedAt?: number;
   };
   auditLog: AuditLogEntry[];
+  agents: Record<string, StoredAgentConfig>;
 };
 
 const MAX_AUDIT_ENTRIES = 200;
@@ -97,6 +116,7 @@ export class EncryptedSessionVault {
         previousHash: options.previousMcpToken ? hashSecretToken(options.previousMcpToken) : undefined,
       },
       auditLog: [],
+      agents: {},
     };
   }
 
@@ -120,6 +140,7 @@ export class EncryptedSessionVault {
             ? decrypted.mcpTokens
             : this.doc.mcpTokens,
           auditLog: Array.isArray(decrypted.auditLog) ? decrypted.auditLog.slice(-MAX_AUDIT_ENTRIES) : [],
+          agents: decrypted.agents || {},
         };
       }
     } catch (err: unknown) {
@@ -173,6 +194,42 @@ export class EncryptedSessionVault {
       .filter((account) => account.ownerId === ownerId)
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map(toPublicAccountSummary);
+  }
+
+  listAgents(): PublicAgentConfig[] {
+    return Object.values(this.doc.agents).map(toPublicAgentConfig);
+  }
+
+  getAgent(id: string): StoredAgentConfig | undefined {
+    return this.doc.agents[id];
+  }
+
+  async upsertAgent(input: Omit<StoredAgentConfig, 'id' | 'apiKey' | 'updatedAt'> & { id?: string; apiKey?: string; clearApiKey?: boolean }): Promise<PublicAgentConfig> {
+    const id = input.id || `agt_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    const existing = this.doc.agents[id];
+    const agent: StoredAgentConfig = {
+      id,
+      name: input.name,
+      accountId: input.accountId,
+      chatId: input.chatId,
+      providerUrl: input.providerUrl,
+      model: input.model,
+      apiKey: input.clearApiKey ? '' : (input.apiKey || existing?.apiKey || ''),
+      systemPrompt: input.systemPrompt,
+      tools: input.tools,
+      isEnabled: input.isEnabled,
+      updatedAt: Date.now(),
+    };
+    this.doc.agents[id] = agent;
+    await this.persist();
+    return toPublicAgentConfig(agent);
+  }
+
+  async deleteAgent(id: string): Promise<boolean> {
+    if (!this.doc.agents[id]) return false;
+    delete this.doc.agents[id];
+    await this.persist();
+    return true;
   }
 
   getAuthorizedAccount(ownerId: string, accountId: string): StoredAccountRecord | undefined {
@@ -292,6 +349,11 @@ export class EncryptedSessionVault {
     this.writeQueue = writeTask.catch(() => undefined);
     return writeTask;
   }
+}
+
+function toPublicAgentConfig(agent: StoredAgentConfig): PublicAgentConfig {
+  const { apiKey, ...publicAgent } = agent;
+  return { ...publicAgent, hasApiKey: Boolean(apiKey) };
 }
 
 export function toPublicAccountSummary(account: StoredAccountRecord): PublicAccountSummary {

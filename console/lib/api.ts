@@ -12,6 +12,20 @@ export type PublicAccountSummary = {
   updatedAt: number;
 };
 
+export type PublicAgentConfig = {
+  id: string;
+  name: string;
+  accountId: string;
+  chatId: string;
+  providerUrl: string;
+  model: string;
+  systemPrompt: string;
+  tools: Array<'read_group_messages' | 'search_group_messages' | 'reply_to_group'>;
+  isEnabled: boolean;
+  hasApiKey: boolean;
+  updatedAt: number;
+};
+
 export type AccountStatus = {
   accountId: string;
   mainDcId: number;
@@ -150,6 +164,11 @@ export const consoleApi = {
   }),
   logout: () => apiFetch<{ authenticated: boolean }>('/api/auth/logout', { method: 'POST' }),
   listAccounts: () => apiFetch<{ accounts: PublicAccountSummary[]; runtimeMode: 'gramjs' | 'mock'; disclaimer: string }>('/api/accounts'),
+  listAgents: () => apiFetch<{ agents: PublicAgentConfig[] }>('/api/agents'),
+  saveAgent: (agent: Omit<PublicAgentConfig, 'id' | 'hasApiKey' | 'updatedAt'> & { id?: string; apiKey?: string; clearApiKey?: boolean }) => (
+    apiFetch<{ agent: PublicAgentConfig }>('/api/agents', { method: 'POST', body: JSON.stringify(agent) })
+  ),
+  deleteAgent: (id: string) => apiFetch<{ deleted: boolean }>(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   importSession: (payload: BridgeSessionPayload, label?: string) => (
     apiFetch<{ account: PublicAccountSummary; notice: string }>('/api/accounts/import-session', {
       method: 'POST',

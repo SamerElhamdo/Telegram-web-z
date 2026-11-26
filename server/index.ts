@@ -38,6 +38,11 @@ async function main() {
     serverVersion,
   });
 
+  for (const agent of vault.listAgents().filter((item) => item.isEnabled)) {
+    const account = vault.getAuthorizedAccount(config.ownerId, agent.accountId);
+    if (account) await runtime.getAccountStatus(account);
+  }
+
   const server = serve({
     fetch: app.fetch,
     hostname: config.host,

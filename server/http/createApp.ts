@@ -62,6 +62,20 @@ const ROTATE_TOKEN_BODY_SCHEMA = z.object({
   keepPrevious: z.boolean().optional().default(true),
 });
 
+const AGENT_BODY_SCHEMA = z.object({
+  id: z.string().trim().min(5).max(32).optional(),
+  name: z.string().trim().min(1).max(80),
+  accountId: z.string().trim().min(3).max(64),
+  chatId: z.string().trim().min(1).max(64).regex(/^-?\d+$/),
+  providerUrl: z.string().url().max(500),
+  model: z.string().trim().min(1).max(120),
+  apiKey: z.string().max(512).optional(),
+  clearApiKey: z.boolean().optional(),
+  systemPrompt: z.string().trim().min(1).max(12000),
+  tools: z.array(z.enum(['read_group_messages', 'search_group_messages', 'reply_to_group'])).max(3),
+  isEnabled: z.boolean(),
+});
+
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -97,6 +111,75 @@ export function createServerApp(deps: AppContextDeps) {
     runtime,
     serverVersion,
   });
+
+  const updateRuntime = runtime as TelegramAccountRuntime & {
+    setIncomingMessageHandler?: (handler: (message: { accountId: string; chatId: string; messageId: number; text: string; isOutgoing: boolean }) => void) => void;
+  };
+  updateRuntime.setIncomingMessageHandler?.((message) => {
+    if (!message.isOutgoing) void handleAgentMessage(message).catch((err: unknown) => {
+      void vault.appendAudit({
+        actor: 'system', action: 'agent.reply', accountId: message.accountId, target: message.chatId,
+        status: 'error', detail: err instanceof Error ? err.message : 'Agent response failed',
+      });
+    });
+  });
+
+  async function handleAgentMessage(message: { accountId: string; chatId: string; messageId: number; text: string }) {
+    const agent = vault.listAgents().find((item) => item.accountId === message.accountId && item.chatId === message.chatId && item.isEnabled);
+    if (!agent || !agent.tools.includes('reply_to_group')) return;
+    const storedAgent = vault.getAgent(agent.id);
+    const account = vault.getAuthorizedAccount(config.ownerId, agent.accountId);
+    if (!storedAgent?.apiKey || !account) return;
+
+    const endpoint = `${storedAgent.providerUrl.replace(/\/+$/, '')}/chat/completions`;
+    const availableTools = [
+      ...(agent.tools.includes('read_group_messages') ? [{ type: 'function', function: { name: 'read_group_messages', description: 'Read recent messages in the configured group', parameters: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 30 } } } } }] : []),
+      ...(agent.tools.includes('search_group_messages') ? [{ type: 'function', function: { name: 'search_group_messages', description: 'Search messages in the configured group', parameters: { type: 'object', required: ['query'], properties: { query: { type: 'string', maxLength: 200 } } } } }] : []),
+      { type: 'function', function: { name: 'reply_to_group', description: 'Reply to the incoming message in the configured group', parameters: { type: 'object', required: ['text'], properties: { text: { type: 'string', maxLength: 4096 } } } } },
+    ];
+    const messages: Array<Record<string, unknown>> = [
+      { role: 'system', content: storedAgent.systemPrompt },
+      { role: 'user', content: message.text },
+    ];
+    let isReplied = false;
+    for (let turn = 0; turn < 4; turn += 1) {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${storedAgent.apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: storedAgent.model, messages, tools: availableTools, tool_choice: 'auto' }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) throw new Error(`AI provider returned HTTP ${response.status}`);
+      const result = await response.json() as { choices?: { message?: { role?: string; content?: unknown; tool_calls?: { id: string; function: { name: string; arguments: string } }[] } }[] };
+      const assistantMessage = result.choices?.[0]?.message;
+      if (!assistantMessage) return;
+      messages.push(assistantMessage as Record<string, unknown>);
+      const toolCalls = assistantMessage.tool_calls || [];
+      if (!toolCalls.length) {
+        if (!isReplied && typeof assistantMessage.content === 'string' && assistantMessage.content.trim()) {
+          await runtime.sendMessage(account, { chatId: agent.chatId, text: assistantMessage.content.trim().slice(0, 4096), replyToMsgId: message.messageId });
+          isReplied = true;
+        }
+        break;
+      }
+      for (const toolCall of toolCalls) {
+        const args = JSON.parse(toolCall.function.arguments) as { limit?: number; query?: string; text?: string };
+        let output: unknown;
+        if (toolCall.function.name === 'read_group_messages' && agent.tools.includes('read_group_messages')) {
+          output = await runtime.readMessages(account, { chatId: agent.chatId, limit: Math.max(1, Math.min(args.limit || 12, 30)) });
+        } else if (toolCall.function.name === 'search_group_messages' && agent.tools.includes('search_group_messages') && args.query?.trim()) {
+          output = await runtime.searchMessages(account, { chatId: agent.chatId, query: args.query.slice(0, 200), limit: 20 });
+        } else if (toolCall.function.name === 'reply_to_group' && args.text?.trim() && !isReplied) {
+          output = await runtime.sendMessage(account, { chatId: agent.chatId, text: args.text.trim().slice(0, 4096), replyToMsgId: message.messageId });
+          isReplied = true;
+        } else {
+          output = { error: 'Tool is unavailable or arguments are invalid' };
+        }
+        messages.push({ role: 'tool', tool_call_id: toolCall.id, content: JSON.stringify(output) });
+      }
+    }
+    await vault.appendAudit({ actor: 'system', action: 'agent.reply', accountId: agent.accountId, target: agent.chatId, status: 'ok', detail: `Agent ${agent.name} processed an incoming message` });
+  }
 
   // Global security headers
   app.use('*', async (c, next) => {
@@ -258,10 +341,32 @@ export function createServerApp(deps: AppContextDeps) {
 
   app.use('/api/accounts/*', requireAdminMiddleware);
   app.use('/api/accounts', requireAdminMiddleware);
+  app.use('/api/agents/*', requireAdminMiddleware);
+  app.use('/api/agents', requireAdminMiddleware);
   app.use('/api/approvals/*', requireAdminMiddleware);
   app.use('/api/approvals', requireAdminMiddleware);
   app.use('/api/mcp/*', requireAdminMiddleware);
   app.use('/api/audit', requireAdminMiddleware);
+
+  app.get('/api/agents', (c) => c.json({ agents: vault.listAgents() }));
+
+  app.post('/api/agents', async (c) => {
+    const body = await readValidatedJson(c, AGENT_BODY_SCHEMA);
+    if (!body || !vault.getAuthorizedAccount(config.ownerId, body.accountId)) {
+      return c.json({ error: 'إعدادات الوكيل غير صالحة أو الحساب غير موجود' }, 400);
+    }
+    const agent = await vault.upsertAgent(body);
+    if (agent.isEnabled) {
+      const account = vault.getAuthorizedAccount(config.ownerId, agent.accountId);
+      if (account) await runtime.getAccountStatus(account);
+    }
+    return c.json({ agent }, body.id ? 200 : 201);
+  });
+
+  app.delete('/api/agents/:agentId', async (c) => {
+    const deleted = await vault.deleteAgent(c.req.param('agentId'));
+    return deleted ? c.json({ deleted: true }) : c.json({ error: 'الوكيل غير موجود' }, 404);
+  });
 
   // Accounts API
   app.get('/api/accounts', (c) => {
