@@ -28,8 +28,8 @@ ENV APP_ENV=production \
 
 RUN npm run build:production && npm run build:console
 
-# Keep only production dependencies + pinned tsx runtime for the Node server stage
-RUN npm prune --omit=dev && npm install --no-save --no-audit --no-fund tsx@4.23.15
+# Keep production dependencies, including tsx used to run the Node server
+RUN npm prune --omit=dev
 
 FROM node:24-slim AS runner
 WORKDIR /app
