@@ -6,7 +6,7 @@ export function debounce<F extends AnyToVoidFunction>(
   shouldRunFirst = true,
   shouldRunLast = true,
 ) {
-  let waitingTimeout: number | undefined;
+  let waitingTimeout: ReturnType<typeof setTimeout> | undefined;
 
   return (...args: Parameters<F>) => {
     if (waitingTimeout) {
@@ -16,7 +16,7 @@ export function debounce<F extends AnyToVoidFunction>(
       fn(...args);
     }
 
-    waitingTimeout = self.setTimeout(() => {
+    waitingTimeout = setTimeout(() => {
       if (shouldRunLast) {
         fn(...args);
       }
@@ -31,7 +31,7 @@ export function throttle<F extends AnyToVoidFunction>(
   ms: number,
   shouldRunFirst = true,
 ) {
-  let interval: number | undefined;
+  let interval: ReturnType<typeof setInterval> | undefined;
   let isPending: boolean;
   let args: Parameters<F>;
 
@@ -45,9 +45,9 @@ export function throttle<F extends AnyToVoidFunction>(
         fn(...args);
       }
 
-      interval = self.setInterval(() => {
+      interval = setInterval(() => {
         if (!isPending) {
-          self.clearInterval(interval);
+          clearInterval(interval);
           interval = undefined;
           return;
         }
