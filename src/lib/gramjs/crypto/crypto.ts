@@ -1,5 +1,7 @@
 import AES from '@cryptography/aes';
 
+const AES_CONSTRUCTOR = (AES as unknown as { default?: typeof AES }).default ?? AES;
+
 class Counter {
   public counter: Uint8Array;
 
@@ -38,7 +40,7 @@ class CTR {
     this._carryBlock = undefined;
     this._carryOffset = 0;
 
-    this._aes = new AES(key);
+    this._aes = new AES_CONSTRUCTOR(key);
   }
 
   update(plainText: Uint8Array) {
