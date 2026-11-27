@@ -270,10 +270,8 @@ export class EncryptedSessionVault {
 
     const existing = Object.values(this.doc.accounts).find((account) => (
       account.ownerId === ownerId
-      && (
-        (validated.profile.userId && account.profile.userId === validated.profile.userId)
-        || (validated.slot !== undefined && account.slot === validated.slot)
-      )
+      && Boolean(validated.profile.userId)
+      && account.profile.userId === validated.profile.userId
     ));
 
     const id = existing?.id || `acc_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
@@ -284,7 +282,8 @@ export class EncryptedSessionVault {
       id,
       ownerId,
       label,
-      slot: validated.slot,
+      // Slot numbers belong to one browser's local storage and are not global account identifiers
+      slot: undefined,
       mainDcId: validated.sessionData.mainDcId,
       wssEndpoint: getWssEndpointForDc(validated.sessionData.mainDcId, Boolean(validated.sessionData.isTest)),
       isTest: Boolean(validated.sessionData.isTest),

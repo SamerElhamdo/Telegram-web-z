@@ -7,9 +7,7 @@ import {
   Input,
   Label,
   Modal,
-  Separator,
   Spinner,
-  Switch,
 } from '@heroui/react';
 
 import type { AccountStatus, PublicAccountSummary } from '../lib/api';
@@ -18,7 +16,6 @@ import type { BrowserAuthDiagnostics, BrowserSlotSummary } from '../lib/browserB
 import { consoleApi } from '../lib/api';
 import {
   buildLocalSlotBridgePayload,
-  clearLocalWebZSlot,
   detectLocalWebZSlots,
   readBrowserAuthDiagnostics,
 } from '../lib/browserBridge';
@@ -49,7 +46,6 @@ export function AccountsPage({
 
   // Disconnect modal state
   const [accountToDisconnect, setAccountToDisconnect] = useState<PublicAccountSummary | undefined>();
-  const [shouldAlsoClearBrowserSlot, setShouldAlsoClearBrowserSlot] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
 
   function refreshBrowserInfo() {
@@ -110,12 +106,7 @@ export function AccountsPage({
     setFeedback(undefined);
     try {
       const res = await consoleApi.deleteAccount(accountToDisconnect.id);
-      if (shouldAlsoClearBrowserSlot && accountToDisconnect.slot) {
-        clearLocalWebZSlot(accountToDisconnect.slot);
-        refreshBrowserInfo();
-      }
       setAccountToDisconnect(undefined);
-      setShouldAlsoClearBrowserSlot(false);
       await onRefreshAccounts();
       setFeedback({
         status: 'warning',
@@ -376,7 +367,6 @@ export function AccountsPage({
                         size="sm"
                         onPress={() => {
                           setAccountToDisconnect(account);
-                          setShouldAlsoClearBrowserSlot(false);
                         }}
                       >
                         فصل الحساب وحذف البيانات المحلية
@@ -472,29 +462,13 @@ export function AccountsPage({
                   </Alert.Content>
                 </Alert>
 
-                {accountToDisconnect?.slot && (
-                  <>
-                    <Separator />
-                    <Switch
-                      isSelected={shouldAlsoClearBrowserSlot}
-                      onChange={setShouldAlsoClearBrowserSlot}
-                    >
-                      <Switch.Control>
-                        <Switch.Thumb />
-                      </Switch.Control>
-                      <Switch.Content>
-                        <Label className="text-sm">حذف بيانات الخانة #{accountToDisconnect.slot} من تخزين المتصفح المحلي أيضاً</Label>
-                      </Switch.Content>
-                    </Switch>
-                  </>
-                )}
               </Modal.Body>
               <Modal.Footer className="flex gap-2 justify-end">
                 <Button variant="secondary" onPress={() => setAccountToDisconnect(undefined)} isDisabled={isDisconnecting}>
                   إلغاء
                 </Button>
                 <Button variant="danger" onPress={() => void handleConfirmDisconnect()} isDisabled={isDisconnecting}>
-                  {isDisconnecting ? 'جارٍ الحذف...' : 'تأكيد الفصل والحذف المحلي'}
+                  {isDisconnecting ? 'جارٍ الحذف...' : 'تأكيد فصل الحساب'}
                 </Button>
               </Modal.Footer>
             </Modal.Dialog>
