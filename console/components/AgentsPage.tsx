@@ -5,7 +5,6 @@ import {
   Card,
   Checkbox,
   Chip,
-  Description,
   Dropdown,
   Input,
   Label,
@@ -26,8 +25,7 @@ type AgentDraft = {
   chatId: string;
   providerUrl: string;
   model: string;
-  apiKey: string;
-  clearApiKey: boolean;
+  persona: NonNullable<PublicAgentConfig['persona']>;
   systemPrompt: string;
   tools: PublicAgentConfig['tools'];
   memoryMessages: number;
@@ -36,23 +34,29 @@ type AgentDraft = {
 
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const MEMORY_OPTIONS = [20, 40, 60];
+const EMPTY_PERSONA = {
+  name: '', role: 'مساعد المجموعة', region: '', dialect: '', tone: 'ودود ولطيف', formality: 'عفوي ومختصر', ageStyle: '',
+};
 const TOOL_OPTIONS: { id: PublicAgentConfig['tools'][number]; title: string; description: string }[] = [
   { id: 'read_group_messages', title: 'قراءة رسائل المجموعة', description: 'يقرأ سياق المحادثة قبل صياغة الرد.' },
   { id: 'search_group_messages', title: 'البحث في سجل المجموعة', description: 'يعثر على إجابات أو معلومات وردت سابقاً.' },
   { id: 'reply_to_group', title: 'الرد وذكر الأعضاء', description: 'يرد على الرسالة التي أشارت للحساب، ويمكنه ذكر عضو باستخدام @username.' },
 ];
-const DEFAULT_SYSTEM_PROMPT = `أنت مساعد خدمة عملاء محترف داخل مجموعة Telegram.
+const DEFAULT_SYSTEM_PROMPT = `أنت مساعد المجموعة. اكتب كأنك تشارك في محادثة عادية، بدون تكلف أو رسمية زائدة.
 
 أسلوبك:
-- أجب بلغة صاحب الرسالة وبأسلوب واضح وودود ومختصر.
+- أجب بلغة صاحب الرسالة وبصياغة طبيعية وودودة ومختصرة.
+- استخدم اللهجة المحددة في إعدادات الهوية عند الكتابة بالعربية.
+- تجنب العبارات الجاهزة، والتنسيق أو التعداد إلا عندما يفيدان فعلاً.
 - اعتمد على ذاكرة المجموعة ورسائلها عند توفرها.
 - لا تخترع معلومات أو وعوداً. إذا لم تعرف الإجابة، قل ذلك بوضوح واطلب توضيحاً.
 - لا ترد إلا عندما تكون الرسالة قد أشارت إلى حسابك.
 - يمكنك ذكر عضو مناسب باستخدام @username إذا كان ذلك يساعد على حل الطلب.
-- أرسل رداً واحداً مناسباً للرسالة، ولا تكرر التحية في كل رد.`;
+- أرسل رداً واحداً مناسباً للرسالة، ولا تكرر التحية في كل رد.
+- لا تختلق أخطاء إملائية أو تجارب شخصية لتبدو كشخص حقيقي.`;
 
 const EMPTY_DRAFT: AgentDraft = {
-  name: '', accountId: '', chatId: '', providerUrl: OPENROUTER_BASE_URL, model: '', apiKey: '', clearApiKey: false,
+  name: '', accountId: '', chatId: '', providerUrl: OPENROUTER_BASE_URL, model: '', persona: EMPTY_PERSONA,
   systemPrompt: DEFAULT_SYSTEM_PROMPT, tools: ['read_group_messages', 'search_group_messages', 'reply_to_group'],
   memoryMessages: 20, isEnabled: true,
 };
@@ -63,6 +67,8 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
   const [dialogs, setDialogs] = useState<DialogSummary[]>([]);
   const [models, setModels] = useState<OpenRouterModel[]>([]);
   const [apiKey, setApiKey] = useState('');
+  const [hasOpenRouterKey, setHasOpenRouterKey] = useState(false);
+  const [groupSearch, setGroupSearch] = useState('');
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string }>();
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
@@ -75,6 +81,8 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
 
   useEffect(() => {
     void refreshAgents().catch((err: unknown) => setFeedback({ type: 'error', text: getErrorMessage(err, 'تعذر تحميل الوكلاء') }));
+    void consoleApi.getOpenRouterSettings().then(({ hasApiKey: hasKey }) => setHasOpenRouterKey(hasKey))
+      .catch((err: unknown) => setFeedback({ type: 'error', text: getErrorMessage(err, 'تعذر تحميل إعداد OpenRouter') }));
   }, []);
 
   useEffect(() => {
@@ -93,7 +101,7 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
     setIsLoadingModels(true);
     setFeedback(undefined);
     try {
-      const result = await consoleApi.listOpenRouterModels(apiKey || undefined, draft.id);
+      const result = await consoleApi.listOpenRouterModels();
       setModels(result.models);
       if (result.models.length && !result.models.some((model) => model.id === draft.model)) {
         setDraft((current) => ({ ...current, model: result.models[0].id }));
@@ -113,21 +121,20 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
       chatId: agent.chatId,
       providerUrl: OPENROUTER_BASE_URL,
       model: agent.model,
-      apiKey: '',
-      clearApiKey: false,
+      persona: agent.persona || EMPTY_PERSONA,
       systemPrompt: agent.systemPrompt,
       tools: agent.tools,
       memoryMessages: Math.max(20, agent.memoryMessages),
       isEnabled: agent.isEnabled,
     });
-    setApiKey('');
+    setGroupSearch('');
     setModels([]);
     setFeedback(undefined);
   }
 
   function startNewAgent() {
     setDraft(EMPTY_DRAFT);
-    setApiKey('');
+    setGroupSearch('');
     setModels([]);
     setFeedback(undefined);
   }
@@ -137,8 +144,7 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
     setIsSaving(true);
     setFeedback(undefined);
     try {
-      const { apiKey: _apiKey, clearApiKey, ...config } = draft;
-      const result = await consoleApi.saveAgent({ ...config, providerUrl: OPENROUTER_BASE_URL, apiKey: apiKey || undefined, clearApiKey });
+      const result = await consoleApi.saveAgent({ ...draft, providerUrl: OPENROUTER_BASE_URL });
       await refreshAgents();
       setFeedback({ type: 'success', text: `تم حفظ «${result.agent.name}» وإعداد ذاكرته المشفّرة.` });
       startNewAgent();
@@ -146,6 +152,32 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
       setFeedback({ type: 'error', text: getErrorMessage(err, 'تعذر حفظ الوكيل') });
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function saveOpenRouterKey() {
+    setIsSaving(true);
+    setFeedback(undefined);
+    try {
+      const { hasApiKey: hasKey } = await consoleApi.saveOpenRouterApiKey(apiKey);
+      setHasOpenRouterKey(hasKey);
+      setApiKey('');
+      setFeedback({ type: 'success', text: 'تم حفظ مفتاح OpenRouter المشترك. أصبح متاحاً لكل الوكلاء.' });
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: getErrorMessage(err, 'تعذر حفظ مفتاح OpenRouter') });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function clearOpenRouterKey() {
+    try {
+      await consoleApi.clearOpenRouterApiKey();
+      setHasOpenRouterKey(false);
+      setModels([]);
+      setFeedback({ type: 'success', text: 'تم حذف مفتاح OpenRouter المشترك.' });
+    } catch (err: unknown) {
+      setFeedback({ type: 'error', text: getErrorMessage(err, 'تعذر حذف مفتاح OpenRouter') });
     }
   }
 
@@ -183,6 +215,20 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
       </section>
 
       {feedback && <Alert status={feedback.type === 'error' ? 'danger' : 'success'}><Alert.Indicator /><Alert.Content><Alert.Description>{feedback.text}</Alert.Description></Alert.Content></Alert>}
+
+      <Card>
+        <Card.Header className="border-b border-border px-5 py-4">
+          <div className="flex w-full flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1"><Card.Title>اتصال الذكاء الاصطناعي</Card.Title><Card.Description>أضف مفتاح OpenRouter مرة واحدة ليستخدمه كل الوكلاء.</Card.Description></div>
+            <Chip color={hasOpenRouterKey ? 'success' : 'warning'} variant="soft" size="sm"><Chip.Label>{hasOpenRouterKey ? 'المفتاح محفوظ ومشفّر' : 'المفتاح غير مضبوط'}</Chip.Label></Chip>
+          </div>
+        </Card.Header>
+        <Card.Content className="grid gap-3 p-5 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-end">
+          <div className="space-y-2"><Label htmlFor="shared-openrouter-key">مفتاح OpenRouter المشترك</Label><Input id="shared-openrouter-key" type="password" autoComplete="new-password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={hasOpenRouterKey ? 'المفتاح محفوظ؛ أدخل قيمة جديدة للاستبدال' : 'أدخل المفتاح'} /></div>
+          <Button isDisabled={!apiKey.trim() || isSaving} onPress={() => void saveOpenRouterKey()}>{isSaving ? <><Spinner size="sm" /> جارٍ الحفظ</> : 'حفظ المفتاح'}</Button>
+          <div className="flex gap-2"><Button variant="secondary" isDisabled={!hasOpenRouterKey || isLoadingModels} onPress={() => void loadModels()}>{isLoadingModels ? <Spinner size="sm" /> : 'اختبار وتحميل النماذج'}</Button>{hasOpenRouterKey && <Button variant="ghost" onPress={() => void clearOpenRouterKey()}>حذف</Button>}</div>
+        </Card.Content>
+      </Card>
 
       <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.55fr)_minmax(19rem,0.85fr)]">
         <Card className="overflow-hidden">
@@ -226,8 +272,10 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
                   >
                     <Label>المجموعة المستهدفة</Label>
                     <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
-                    <Select.Popover><ListBox>
-                      {dialogs.map((dialog) => <ListBox.Item key={dialog.chatId} id={dialog.chatId} textValue={dialog.title}>
+                    <Select.Popover>
+                      <div className="border-b border-border p-2"><Input aria-label="ابحث عن مجموعة" placeholder="ابحث عن مجموعة..." value={groupSearch} onChange={(e) => setGroupSearch(e.target.value)} /></div>
+                      <ListBox>
+                      {dialogs.filter((dialog) => dialog.title.toLocaleLowerCase().includes(groupSearch.toLocaleLowerCase())).map((dialog) => <ListBox.Item key={dialog.chatId} id={dialog.chatId} textValue={dialog.title}>
                         <span>{dialog.title}</span><span className="ms-auto text-xs text-muted">{dialog.type === 'supergroup' ? 'مجموعة فائقة' : 'مجموعة'}</span><ListBox.ItemIndicator />
                       </ListBox.Item>)}
                     </ListBox></Select.Popover>
@@ -241,40 +289,18 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
                 </div>
               </FormSection>
 
-              <FormSection number="02" title="النموذج والمفتاح" description="مفتاح OpenRouter محفوظ مشفّراً ولا يظهر بعد الحفظ.">
+              <FormSection number="02" title="اختيار النموذج" description="يستخدم هذا الوكيل مفتاح OpenRouter المشترك المحفوظ في إعدادات الاتصال أعلاه.">
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-default/20 p-3">
-                  <div className="space-y-1">
-                    <div className="font-medium">OpenRouter</div>
-                    <p className="text-xs text-muted">واجهة متوافقة مع OpenAI · {OPENROUTER_BASE_URL}</p>
-                  </div>
+                  <div className="space-y-1"><div className="font-medium">OpenRouter</div><p className="text-xs text-muted">واجهة متوافقة مع OpenAI · {OPENROUTER_BASE_URL}</p></div>
                   <a className="text-xs text-primary underline-offset-4 hover:underline" href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">إنشاء مفتاح</a>
                 </div>
-                <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-                  <div className="space-y-2">
-                    <Label htmlFor="openrouter-api-key">مفتاح API</Label>
-                    <Input
-                      id="openrouter-api-key"
-                      type="password"
-                      autoComplete="new-password"
-                      value={apiKey}
-                      placeholder={draft.id && agents.find((agent) => agent.id === draft.id)?.hasApiKey ? 'المفتاح محفوظ؛ اتركه كما هو' : 'أدخل مفتاح OpenRouter'}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      aria-describedby={draft.id && agents.find((agent) => agent.id === draft.id)?.hasApiKey ? 'openrouter-key-help' : undefined}
-                    />
-                    {draft.id && agents.find((agent) => agent.id === draft.id)?.hasApiKey && <Description id="openrouter-key-help">المفتاح الحالي محفوظ. أدخل مفتاحاً جديداً لاستبداله.</Description>}
-                  </div>
-                  <Button type="button" variant="secondary" isDisabled={isLoadingModels || (!apiKey && !draft.id)} onPress={() => void loadModels()}>
-                    {isLoadingModels ? <><Spinner size="sm" /> تحميل النماذج</> : 'تحديث النماذج'}
-                  </Button>
-                </div>
-                {draft.id && agents.find((agent) => agent.id === draft.id)?.hasApiKey && <Checkbox isSelected={draft.clearApiKey} onChange={(isSelected) => setDraft((current) => ({ ...current, clearApiKey: isSelected }))}>
-                  <Checkbox.Content><Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>حذف المفتاح المحفوظ</Checkbox.Content>
-                </Checkbox>}
+                {!hasOpenRouterKey && <p className="text-sm text-warning">احفظ مفتاح OpenRouter في بطاقة الاتصال أعلاه أولاً.</p>}
+                <Button type="button" variant="secondary" isDisabled={isLoadingModels || !hasOpenRouterKey} onPress={() => void loadModels()}>{isLoadingModels ? <><Spinner size="sm" /> تحميل النماذج</> : 'تحديث النماذج'}</Button>
                 <Select
                   fullWidth
                   isRequired
                   isDisabled={!models.length}
-                  placeholder={models.length ? 'اختر النموذج' : 'أدخل المفتاح ثم حمّل النماذج'}
+                  placeholder={models.length ? 'اختر النموذج' : 'حمّل النماذج من إعداد الاتصال أعلاه'}
                   value={draft.model || null}
                   onChange={(value) => setDraft((current) => ({ ...current, model: String(value || '') }))}
                 >
@@ -289,7 +315,41 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
                 {models.length > 0 && <p className="text-xs text-muted">{models.length} نموذجاً يدعم إكمال المحادثة والأدوات متاح للاختيار.</p>}
               </FormSection>
 
-              <FormSection number="03" title="الذاكرة والتعليمات" description="ذاكرة نصية متحركة؛ لا تستخدم قاعدة بيانات متجهية أو تضمينات.">
+              <FormSection number="03" title="هوية الوكيل وأسلوبه" description="حدد الاسم واللهجة والنبرة التي يلتزم بها في المجموعة.">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="persona-name">اسم الشخصية</Label>
+                    <Input id="persona-name" maxLength={80} value={draft.persona.name} onChange={(e) => setDraft((current) => ({ ...current, persona: { ...current.persona, name: e.target.value } }))} placeholder="مثلاً: ليان" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="persona-role">الدور</Label>
+                    <Input id="persona-role" maxLength={120} value={draft.persona.role} onChange={(e) => setDraft((current) => ({ ...current, persona: { ...current.persona, role: e.target.value } }))} placeholder="مثلاً: مساعدة المجموعة" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="persona-region">البلد أو المنطقة</Label>
+                    <Input id="persona-region" maxLength={120} value={draft.persona.region} onChange={(e) => setDraft((current) => ({ ...current, persona: { ...current.persona, region: e.target.value } }))} placeholder="مثلاً: دمشق، سوريا" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="persona-dialect">اللهجة</Label>
+                    <Input id="persona-dialect" maxLength={120} value={draft.persona.dialect} onChange={(e) => setDraft((current) => ({ ...current, persona: { ...current.persona, dialect: e.target.value } }))} placeholder="مثلاً: شامية خفيفة" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="persona-age-style">الطابع العمري للصوت (اختياري)</Label>
+                    <Input id="persona-age-style" maxLength={80} value={draft.persona.ageStyle} onChange={(e) => setDraft((current) => ({ ...current, persona: { ...current.persona, ageStyle: e.target.value } }))} placeholder="مثلاً: شاب وبسيط" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="persona-tone">النبرة</Label>
+                    <Input id="persona-tone" maxLength={120} value={draft.persona.tone} onChange={(e) => setDraft((current) => ({ ...current, persona: { ...current.persona, tone: e.target.value } }))} placeholder="مثلاً: ودود، هادئ، مرح" />
+                  </div>
+                  <div className="space-y-2 sm:col-span-2">
+                    <Label htmlFor="persona-formality">طريقة الكلام</Label>
+                    <Input id="persona-formality" maxLength={80} value={draft.persona.formality} onChange={(e) => setDraft((current) => ({ ...current, persona: { ...current.persona, formality: e.target.value } }))} placeholder="مثلاً: عفوي ومختصر، بدون مبالغة بالرسمية" />
+                  </div>
+                </div>
+                <p className="text-xs leading-5 text-muted">الطابع يوجه أسلوب الرد فقط؛ لا يدّعي الوكيل عمراً أو تجارب شخصية حقيقية. وإذا سُئل مباشرة عن طبيعته، يجيب بصدق وباختصار.</p>
+              </FormSection>
+
+              <FormSection number="04" title="الذاكرة والتعليمات" description="ذاكرة نصية متحركة؛ لا تستخدم قاعدة بيانات متجهية أو تضمينات.">
                 <Select
                   fullWidth
                   value={String(draft.memoryMessages)}
@@ -320,7 +380,7 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
                 </div>
               </FormSection>
 
-              <FormSection number="04" title="الصلاحيات والتشغيل" description="القدرات متاحة من أول إعداد. لا يوجد طلب موافقة منفصل قبل الرد.">
+              <FormSection number="05" title="الصلاحيات والتشغيل" description="القدرات متاحة من أول إعداد. لا يوجد طلب موافقة منفصل قبل الرد.">
                 <div className="grid gap-2 md:grid-cols-3">
                   {TOOL_OPTIONS.map((tool) => <Checkbox key={tool.id} isSelected={draft.tools.includes(tool.id)} onChange={() => toggleTool(tool.id)} className="rounded-xl border border-border p-3">
                     <Checkbox.Content><Checkbox.Control><Checkbox.Indicator /></Checkbox.Control><span className="space-y-1"><span className="block text-sm font-medium">{tool.title}</span><span className="block text-xs leading-5 text-muted">{tool.description}</span></span></Checkbox.Content>
@@ -338,7 +398,7 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
                 <p className="max-w-lg text-xs leading-5 text-muted">لن يرسل الوكيل إلا داخل المجموعة المحددة، وبعد منشن الحساب المرتبط.</p>
                 <div className="flex gap-2">
                   {draft.id && <Button type="button" variant="secondary" onPress={startNewAgent}>إلغاء</Button>}
-                  <Button type="submit" isDisabled={isSaving || !accounts.length || !draft.model || !draft.chatId || (!draft.id && !apiKey) || (draft.clearApiKey && !apiKey)}>
+                  <Button type="submit" isDisabled={isSaving || !accounts.length || !hasOpenRouterKey || !draft.model || !draft.chatId}>
                     {isSaving ? <><Spinner size="sm" /> جارٍ الحفظ</> : draft.id ? 'حفظ التغييرات' : 'ربط وتشغيل الوكيل'}
                   </Button>
                 </div>
@@ -362,10 +422,11 @@ export function AgentsPage({ accounts }: { accounts: PublicAccountSummary[] }) {
                   </div>
                   <p className="truncate text-sm text-muted">{accounts.find((account) => account.id === agent.accountId)?.label || agent.accountId}</p>
                   <p className="truncate text-xs text-muted">{dialogs.find((dialog) => dialog.chatId === agent.chatId)?.title || agent.chatId}</p>
+                  {agent.persona && (agent.persona.name || agent.persona.dialect) && <p className="truncate text-xs text-muted">{[agent.persona.name, agent.persona.dialect].filter(Boolean).join(' · ')}</p>}
                   <div className="flex flex-wrap gap-1.5 pt-1">
                     <Chip variant="soft" size="sm"><Chip.Label>{agent.model}</Chip.Label></Chip>
                     <Chip variant="soft" size="sm"><Chip.Label>ذاكرة {agent.memoryCount}/{agent.memoryMessages}</Chip.Label></Chip>
-                    {agent.hasApiKey && <Chip color="accent" variant="soft" size="sm"><Chip.Label>OpenRouter متصل</Chip.Label></Chip>}
+                    {hasOpenRouterKey && <Chip color="accent" variant="soft" size="sm"><Chip.Label>OpenRouter متصل</Chip.Label></Chip>}
                   </div>
                 </div>
                 <Dropdown>

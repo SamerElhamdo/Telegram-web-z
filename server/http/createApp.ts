@@ -7,7 +7,7 @@ import { z } from 'zod';
 import type { Context, Next } from 'hono';
 import type { ApprovalStore } from '../approvals/approvalStore';
 import type { ServerConfig } from '../config';
-import type { EncryptedSessionVault } from '../storage/sessionVault';
+import type { AgentPersona, EncryptedSessionVault } from '../storage/sessionVault';
 import type { TelegramAccountRuntime } from '../telegram/types';
 
 import { createTelegramMcpHandler, MCP_TOOL_CATALOG } from '../mcp/createMcpHandler';
@@ -69,8 +69,15 @@ const AGENT_BODY_SCHEMA = z.object({
   chatId: z.string().trim().min(1).max(64).regex(/^-?\d+$/),
   providerUrl: z.string().url().max(500),
   model: z.string().trim().min(1).max(120),
-  apiKey: z.string().max(512).optional(),
-  clearApiKey: z.boolean().optional(),
+  persona: z.object({
+    name: z.string().trim().max(80),
+    role: z.string().trim().max(120),
+    region: z.string().trim().max(120),
+    dialect: z.string().trim().max(120),
+    tone: z.string().trim().max(120),
+    formality: z.string().trim().max(80),
+    ageStyle: z.string().trim().max(80),
+  }).optional(),
   systemPrompt: z.string().trim().min(1).max(12000),
   tools: z.array(z.enum(['read_group_messages', 'search_group_messages', 'reply_to_group'])).max(3),
   memoryMessages: z.number().int().min(20).max(100),
@@ -78,9 +85,8 @@ const AGENT_BODY_SCHEMA = z.object({
 });
 
 const OPENROUTER_MODELS_BODY_SCHEMA = z.object({
-  apiKey: z.string().max(512).optional(),
-  agentId: z.string().trim().min(5).max(32).optional(),
 });
+const OPENROUTER_KEY_BODY_SCHEMA = z.object({ apiKey: z.string().trim().min(1).max(512) });
 
 const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models?output_modalities=text&endpoints=%2Fapi%2Fv1%2Fchat%2Fcompletions&supported_parameters=tools&sort=most-popular&limit=100';
 
@@ -137,7 +143,8 @@ export function createServerApp(deps: AppContextDeps) {
     if (!agent || !agent.tools.includes('reply_to_group')) return;
     const storedAgent = vault.getAgent(agent.id);
     const account = vault.getAuthorizedAccount(config.ownerId, agent.accountId);
-    if (!storedAgent?.apiKey || !account) return;
+    const openRouterApiKey = vault.getOpenRouterApiKey();
+    if (!storedAgent || !openRouterApiKey || !account) return;
 
     const eventId = `${message.accountId}:${message.chatId}:${message.messageId}`;
     const wasAdded = await vault.appendAgentMemory(agent.id, { role: 'user', text: message.text, eventId });
@@ -152,7 +159,7 @@ export function createServerApp(deps: AppContextDeps) {
       { type: 'function', function: { name: 'reply_to_group', description: 'Reply to the incoming message in the configured group', parameters: { type: 'object', required: ['text'], properties: { text: { type: 'string', maxLength: 4096 } } } } },
     ];
     const messages: Array<Record<string, unknown>> = [
-      { role: 'system', content: storedAgent.systemPrompt },
+      { role: 'system', content: buildAgentSystemPrompt(storedAgent.persona, storedAgent.systemPrompt) },
       ...memory.map((entry) => ({ role: entry.role, content: entry.text })),
     ];
     let isReplied = false;
@@ -160,7 +167,7 @@ export function createServerApp(deps: AppContextDeps) {
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${storedAgent.apiKey}`,
+          Authorization: `Bearer ${openRouterApiKey}`,
           'Content-Type': 'application/json',
           'HTTP-Referer': 'https://tg.encryptosystem.com',
           'X-Title': 'Telegram Web Z Console',
@@ -373,10 +380,22 @@ export function createServerApp(deps: AppContextDeps) {
 
   app.get('/api/agents', (c) => c.json({ agents: vault.listAgents() }));
 
+  app.get('/api/agents/provider', (c) => c.json(vault.getOpenRouterSettings()));
+  app.post('/api/agents/provider', async (c) => {
+    const body = await readValidatedJson(c, OPENROUTER_KEY_BODY_SCHEMA);
+    if (!body) return c.json({ error: 'مفتاح OpenRouter غير صالح' }, 400);
+    await vault.setOpenRouterApiKey(body.apiKey);
+    return c.json(vault.getOpenRouterSettings());
+  });
+  app.delete('/api/agents/provider', async (c) => {
+    await vault.clearOpenRouterApiKey();
+    return c.json(vault.getOpenRouterSettings());
+  });
+
   app.post('/api/agents/models', async (c) => {
     const body = await readValidatedJson(c, OPENROUTER_MODELS_BODY_SCHEMA);
     if (!body) return c.json({ error: 'بيانات تحميل نماذج OpenRouter غير صالحة' }, 400);
-    const apiKey = body.apiKey || (body.agentId ? vault.getAgent(body.agentId)?.apiKey : undefined);
+    const apiKey = vault.getOpenRouterApiKey();
     if (!apiKey) return c.json({ error: 'أدخل مفتاح OpenRouter أولاً لتحميل النماذج' }, 400);
     try {
       const response = await fetch(OPENROUTER_MODELS_URL, {
@@ -812,6 +831,31 @@ function clampInt(value: string | undefined, fallback: number, min: number, max:
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) return fallback;
   return Math.max(min, Math.min(max, parsed));
+}
+
+function buildAgentSystemPrompt(persona: AgentPersona | undefined, systemPrompt: string): string {
+  if (!persona) return systemPrompt;
+
+  const identity = [
+    persona.name && `الاسم: ${persona.name}`,
+    persona.role && `الدور: ${persona.role}`,
+    persona.region && `المنطقة: ${persona.region}`,
+    persona.dialect && `اللهجة: ${persona.dialect}`,
+    persona.ageStyle && `الطابع العمري للصوت: ${persona.ageStyle}`,
+    persona.tone && `النبرة: ${persona.tone}`,
+    persona.formality && `طريقة الكلام: ${persona.formality}`,
+  ].filter((item): item is string => Boolean(item));
+
+  if (!identity.length) return systemPrompt;
+
+  return [
+    'هوية الوكيل وأسلوبه:',
+    ...identity,
+    'اكتب بطريقة طبيعية وعفوية تناسب محادثة مجموعة، وتجنب الصياغات الآلية والتعدادات غير اللازمة. لا تختلق عمراً أو تجارب شخصية واقعية. إذا سُئلت مباشرة عن طبيعتك، أجب بصدق وباختصار.',
+    '',
+    'تعليمات المجموعة:',
+    systemPrompt,
+  ].join('\n');
 }
 
 async function tryServeStaticFile(

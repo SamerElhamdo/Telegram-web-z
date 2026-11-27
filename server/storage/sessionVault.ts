@@ -61,6 +61,16 @@ export type AuditLogEntry = {
 
 export type AgentTool = 'read_group_messages' | 'search_group_messages' | 'reply_to_group';
 
+export type AgentPersona = {
+  name: string;
+  role: string;
+  region: string;
+  dialect: string;
+  tone: string;
+  formality: string;
+  ageStyle: string;
+};
+
 export type StoredAgentConfig = {
   id: string;
   name: string;
@@ -68,7 +78,8 @@ export type StoredAgentConfig = {
   chatId: string;
   providerUrl: string;
   model: string;
-  apiKey: string;
+  apiKey?: string;
+  persona?: AgentPersona;
   systemPrompt: string;
   tools: AgentTool[];
   memoryMessages: number;
@@ -79,7 +90,7 @@ export type StoredAgentConfig = {
 
 export type AgentMemoryEntry = { role: 'user' | 'assistant'; text: string; eventId?: string; createdAt: number };
 
-export type PublicAgentConfig = Omit<StoredAgentConfig, 'apiKey' | 'memory'> & { hasApiKey: boolean; memoryCount: number };
+export type PublicAgentConfig = Omit<StoredAgentConfig, 'apiKey' | 'memory'> & { memoryCount: number };
 
 type VaultDocument = {
   version: 1;
@@ -91,6 +102,7 @@ type VaultDocument = {
   };
   auditLog: AuditLogEntry[];
   agents: Record<string, StoredAgentConfig>;
+  openRouterApiKey?: string;
 };
 
 const MAX_AUDIT_ENTRIES = 200;
@@ -121,6 +133,7 @@ export class EncryptedSessionVault {
       },
       auditLog: [],
       agents: {},
+      openRouterApiKey: undefined,
     };
   }
 
@@ -137,6 +150,17 @@ export class EncryptedSessionVault {
       const envelope = JSON.parse(raw) as EncryptedEnvelope;
       const decrypted = decryptJson<VaultDocument>(envelope, this.encryptionKey);
       if (decrypted && decrypted.version === 1 && decrypted.accounts) {
+        const storedAgents = decrypted.agents || {};
+        const legacyAgentKeys = Object.values(storedAgents).map((agent) => agent.apiKey).filter((key): key is string => Boolean(key));
+        const migratedOpenRouterApiKey = decrypted.openRouterApiKey || legacyAgentKeys[0];
+        const agents = Object.fromEntries(Object.entries(storedAgents).map(([id, agent]) => {
+          const { apiKey: _legacyApiKey, ...agentConfig } = agent;
+          return [id, {
+            ...agentConfig,
+            memoryMessages: Math.max(20, agent.memoryMessages || 20),
+            memory: Array.isArray(agent.memory) ? agent.memory : [],
+          }];
+        }));
         this.doc = {
           version: 1,
           accounts: decrypted.accounts,
@@ -144,12 +168,10 @@ export class EncryptedSessionVault {
             ? decrypted.mcpTokens
             : this.doc.mcpTokens,
           auditLog: Array.isArray(decrypted.auditLog) ? decrypted.auditLog.slice(-MAX_AUDIT_ENTRIES) : [],
-          agents: Object.fromEntries(Object.entries(decrypted.agents || {}).map(([id, agent]) => [id, {
-            ...agent,
-            memoryMessages: Math.max(20, agent.memoryMessages || 20),
-            memory: Array.isArray(agent.memory) ? agent.memory : [],
-          }])),
+          agents,
+          openRouterApiKey: migratedOpenRouterApiKey,
         };
+        if (legacyAgentKeys.length) await this.persist();
       }
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException)?.code;
@@ -212,7 +234,25 @@ export class EncryptedSessionVault {
     return this.doc.agents[id];
   }
 
-  async upsertAgent(input: Omit<StoredAgentConfig, 'id' | 'apiKey' | 'updatedAt' | 'memory'> & { id?: string; apiKey?: string; clearApiKey?: boolean }): Promise<PublicAgentConfig> {
+  getOpenRouterSettings(): { hasApiKey: boolean } {
+    return { hasApiKey: Boolean(this.doc.openRouterApiKey) };
+  }
+
+  getOpenRouterApiKey(): string | undefined {
+    return this.doc.openRouterApiKey;
+  }
+
+  async setOpenRouterApiKey(apiKey: string): Promise<void> {
+    this.doc.openRouterApiKey = apiKey;
+    await this.persist();
+  }
+
+  async clearOpenRouterApiKey(): Promise<void> {
+    this.doc.openRouterApiKey = undefined;
+    await this.persist();
+  }
+
+  async upsertAgent(input: Omit<StoredAgentConfig, 'id' | 'apiKey' | 'updatedAt' | 'memory'> & { id?: string }): Promise<PublicAgentConfig> {
     const id = input.id || `agt_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
     const existing = this.doc.agents[id];
     const agent: StoredAgentConfig = {
@@ -222,7 +262,7 @@ export class EncryptedSessionVault {
       chatId: input.chatId,
       providerUrl: input.providerUrl,
       model: input.model,
-      apiKey: input.clearApiKey ? '' : (input.apiKey || existing?.apiKey || ''),
+      persona: input.persona || existing?.persona,
       systemPrompt: input.systemPrompt,
       tools: input.tools,
       memoryMessages: Math.max(20, input.memoryMessages),
@@ -371,8 +411,8 @@ export class EncryptedSessionVault {
 }
 
 function toPublicAgentConfig(agent: StoredAgentConfig): PublicAgentConfig {
-  const { apiKey, memory, ...publicAgent } = agent;
-  return { ...publicAgent, hasApiKey: Boolean(apiKey), memoryCount: memory.length };
+  const { apiKey: _apiKey, memory, ...publicAgent } = agent;
+  return { ...publicAgent, memoryCount: memory.length };
 }
 
 export function toPublicAccountSummary(account: StoredAccountRecord): PublicAccountSummary {

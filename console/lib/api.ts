@@ -19,11 +19,19 @@ export type PublicAgentConfig = {
   chatId: string;
   providerUrl: string;
   model: string;
+  persona?: {
+    name: string;
+    role: string;
+    region: string;
+    dialect: string;
+    tone: string;
+    formality: string;
+    ageStyle: string;
+  };
   systemPrompt: string;
   tools: Array<'read_group_messages' | 'search_group_messages' | 'reply_to_group'>;
   memoryMessages: number;
   isEnabled: boolean;
-  hasApiKey: boolean;
   memoryCount: number;
   updatedAt: number;
 };
@@ -169,10 +177,11 @@ export const consoleApi = {
   logout: () => apiFetch<{ authenticated: boolean }>('/api/auth/logout', { method: 'POST' }),
   listAccounts: () => apiFetch<{ accounts: PublicAccountSummary[]; runtimeMode: 'gramjs' | 'mock'; disclaimer: string }>('/api/accounts'),
   listAgents: () => apiFetch<{ agents: PublicAgentConfig[] }>('/api/agents'),
-  listOpenRouterModels: (apiKey?: string, agentId?: string) => apiFetch<{ models: OpenRouterModel[] }>('/api/agents/models', {
-    method: 'POST', body: JSON.stringify({ apiKey: apiKey || undefined, agentId }),
-  }),
-  saveAgent: (agent: Omit<PublicAgentConfig, 'id' | 'hasApiKey' | 'memoryCount' | 'updatedAt'> & { id?: string; apiKey?: string; clearApiKey?: boolean }) => (
+  getOpenRouterSettings: () => apiFetch<{ hasApiKey: boolean }>('/api/agents/provider'),
+  saveOpenRouterApiKey: (apiKey: string) => apiFetch<{ hasApiKey: boolean }>('/api/agents/provider', { method: 'POST', body: JSON.stringify({ apiKey }) }),
+  clearOpenRouterApiKey: () => apiFetch<{ hasApiKey: boolean }>('/api/agents/provider', { method: 'DELETE' }),
+  listOpenRouterModels: () => apiFetch<{ models: OpenRouterModel[] }>('/api/agents/models', { method: 'POST', body: JSON.stringify({}) }),
+  saveAgent: (agent: Omit<PublicAgentConfig, 'id' | 'memoryCount' | 'updatedAt'> & { id?: string }) => (
     apiFetch<{ agent: PublicAgentConfig }>('/api/agents', { method: 'POST', body: JSON.stringify(agent) })
   ),
   deleteAgent: (id: string) => apiFetch<{ deleted: boolean }>(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
